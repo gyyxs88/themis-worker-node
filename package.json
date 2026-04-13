@@ -1,0 +1,21 @@
+{
+  "name": "themis-worker-node",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test --import tsx src/**/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "themis:worker-node": "tsx src/cli/worker-node-main.ts"
+  },
+  "dependencies": {
+    "themis-contracts": "file:../themis-contracts"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
