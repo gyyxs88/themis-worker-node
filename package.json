@@ -4,6 +4,9 @@
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
+  "bin": {
+    "themis-worker-node": "./themis-worker-node"
+  },
   "scripts": {
     "test": "node --test --import tsx src/**/*.test.ts",
     "typecheck": "tsc --noEmit",

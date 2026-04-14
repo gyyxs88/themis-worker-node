@@ -31,11 +31,14 @@ infra/systemd/themis-worker-node.service.example
 
 ```bash
 mkdir -p ~/services
+git clone git@github.com:gyyxs88/themis-contracts.git ~/services/themis-contracts
 git clone git@github.com:gyyxs88/themis-worker-node.git ~/services/themis-worker-node
 cd ~/services/themis-worker-node
 npm ci
 npm run build
 ```
+
+这里必须先把 `themis-contracts` 放到 sibling 目录；当前 `package.json` 里的 `file:../themis-contracts` 是真实安装前提。
 
 2. 先跑启动前预检：
 

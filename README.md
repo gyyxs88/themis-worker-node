@@ -5,6 +5,7 @@
 负责 Worker Node 本机预检、常驻执行、工作区与 credential 能力声明。
 
 - 当前入口：`src/cli/worker-node-main.ts`
+- 独立 CLI：仓库根目录 `./themis-worker-node`
 - 当前状态：已落入最小 Worker daemon 骨架、平台 worker client、`worker-node run` CLI 与 `doctor worker-node` 预检，并开始通过 `file:../themis-contracts` 依赖消费共享节点协议契约
 - 当前状态：已落入最小 Worker daemon、平台 worker client、`doctor worker-node` 预检、会生成本地 report 的 `worker-node run` 执行器，以及每个 run 的本地 runtime / credential / provider 装配层，并开始通过 `file:../themis-contracts` 依赖消费共享节点协议契约
 - 迁移依据：请对照 `themis` 主仓里的 `docs/repository/themis-three-layer-split-migration-checklist.md`
@@ -19,6 +20,17 @@
 - `src/diagnostics/worker-node-diagnostics.ts` 已提供本地 `workspace / credential / provider` 与平台可达性预检
 - `src/cli/worker-node-main.ts` 已提供 `help`、`doctor worker-node`、`worker-node run --once` 与 `--report-root` 最小 CLI
 - `infra/systemd/themis-worker-node.service.example` 与 `docs/worker-node-systemd-service.md` 已随仓提供节点常驻模板和部署说明
+
+## 部署前提
+
+- 当前仓仍通过 `file:../themis-contracts` 依赖共享契约；真实部署时需要把 `themis-contracts` 作为 sibling repo 放到同一级目录，再执行 `npm ci`。
+- 节点常驻入口应直接使用仓库根目录 `./themis-worker-node`，不要继续借主仓 `./themis` 的兼容 Worker 命令。
+- 本机运行态会写入 `infra/local/worker-runs` 与 `infra/local/worker-runtime`，这两类目录已经加入 `.gitignore`。
+
+## 部署文档
+
+- `docs/worker-node-systemd-service.md`
+- `infra/systemd/themis-worker-node.service.example`
 
 当前验证：
 

@@ -1,0 +1,38 @@
+#!/usr/bin/env node
+
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const rootDir = dirname(fileURLToPath(import.meta.url));
+const srcEntry = resolve(rootDir, "src/cli/worker-node-main.ts");
+const distEntry = resolve(rootDir, "dist/cli/worker-node-main.js");
+const tsxBin = resolve(rootDir, "node_modules/.bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
+const args = process.argv.slice(2);
+
+if (existsSync(tsxBin)) {
+  run(tsxBin, [srcEntry, ...args]);
+} else if (existsSync(distEntry)) {
+  run(process.execPath, [distEntry, ...args]);
+} else {
+  console.error("Themis Worker Node CLI 尚未准备好。请先在仓库根目录执行 `npm install`，或先运行 `npm run build`。");
+  process.exit(1);
+}
+
+function run(command, commandArgs) {
+  const child = spawn(command, commandArgs, {
+    cwd: rootDir,
+    env: process.env,
+    stdio: "inherit",
+  });
+
+  child.on("exit", (code, signal) => {
+    if (signal) {
+      process.kill(process.pid, signal);
+      return;
+    }
+
+    process.exit(code ?? 0);
+  });
+}
