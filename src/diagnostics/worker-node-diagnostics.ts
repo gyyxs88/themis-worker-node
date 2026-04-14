@@ -1,7 +1,11 @@
 import { existsSync, lstatSync } from "node:fs";
-import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { PlatformWorkerClient } from "../platform/platform-worker-client.js";
+import {
+  normalizeOptionalText,
+  resolveWorkerNodeCredential,
+  resolveWorkerNodeProvider,
+} from "../runtime/worker-node-runtime-resolution.js";
 
 export interface WorkerNodeDiagnosticsWorkspaceSummary {
   inputPath: string;
@@ -204,39 +208,23 @@ function summarizeCredential(
   env: NodeJS.ProcessEnv,
   credentialId: string,
 ): WorkerNodeDiagnosticsCredentialSummary {
-  const codexHome = credentialId === "default"
-    ? resolveDefaultCodexHome(env)
-    : resolveManagedCodexHome(workingDirectory, credentialId);
+  const resolved = resolveWorkerNodeCredential(workingDirectory, env, credentialId);
 
   return {
     credentialId,
-    status: existsSync(resolveCodexAuthFilePath(codexHome)) ? "ok" : "missing",
-    codexHome,
+    status: resolved.status,
+    codexHome: resolved.codexHome,
   };
 }
 
 function summarizeProvider(env: NodeJS.ProcessEnv, providerId: string): WorkerNodeDiagnosticsProviderSummary {
-  const suffix = providerId.trim().replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase();
-  const baseUrl = normalizeOptionalText(env[`THEMIS_PROVIDER_${suffix}_BASE_URL`]);
-  const apiKey = normalizeOptionalText(env[`THEMIS_PROVIDER_${suffix}_API_KEY`]);
-  const defaultModel = normalizeOptionalText(env[`THEMIS_PROVIDER_${suffix}_MODEL`]);
-
-  if (baseUrl || apiKey) {
-    return {
-      providerId,
-      status: "ok",
-      source: "env",
-      defaultModel,
-      message: null,
-    };
-  }
-
+  const resolved = resolveWorkerNodeProvider(env, providerId);
   return {
     providerId,
-    status: "missing",
-    source: null,
-    defaultModel: null,
-    message: "当前环境里没有这个 provider 的配置。",
+    status: resolved.status,
+    source: resolved.source,
+    defaultModel: resolved.defaultModel,
+    message: resolved.message,
   };
 }
 
@@ -332,22 +320,6 @@ function summarizeDiagnosis(input: {
     },
     recommendedNextSteps: [...recommendedNextSteps],
   };
-}
-
-function resolveDefaultCodexHome(env: NodeJS.ProcessEnv) {
-  return normalizeOptionalText(env.CODEX_HOME) ?? join(homedir(), ".codex");
-}
-
-function resolveManagedCodexHome(workingDirectory: string, credentialId: string) {
-  return join(workingDirectory, "infra/local/codex-auth", credentialId);
-}
-
-function resolveCodexAuthFilePath(codexHome: string) {
-  return join(codexHome, "auth.json");
-}
-
-function normalizeOptionalText(value: string | null | undefined) {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function dedupeStrings(values: string[]) {

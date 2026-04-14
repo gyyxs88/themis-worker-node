@@ -78,12 +78,21 @@ function createAssignedRun(workspacePath: string): ManagedAgentPlatformWorkerAss
 test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", async () => {
   const root = join(tmpdir(), `themis-worker-node-local-executor-${Date.now()}`);
   const workspacePath = join(root, "workspace");
+  const codexHome = join(root, "codex-home");
   mkdirSync(workspacePath, { recursive: true });
+  mkdirSync(codexHome, { recursive: true });
   writeFileSync(join(workspacePath, "README.md"), "# worker\n", "utf8");
+  writeFileSync(join(codexHome, "auth.json"), "{\"token\":\"default\"}\n", "utf8");
 
   const commands: string[] = [];
   const executor = createLocalWorkerExecutor({
     workingDirectory: root,
+    env: {
+      CODEX_HOME: codexHome,
+      THEMIS_PROVIDER_OPENAI_BASE_URL: "https://api.openai.example.com",
+      THEMIS_PROVIDER_OPENAI_API_KEY: "provider-secret",
+      THEMIS_PROVIDER_OPENAI_MODEL: "gpt-5.4",
+    },
     now: () => "2026-04-14T12:30:00.000Z",
     commandRunner: async (command, args, input) => {
       commands.push(`${command} ${args.join(" ")} @ ${input.cwd}`);
@@ -114,7 +123,7 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
 
     assert.equal(result.kind, "completed");
     assert.match(result.summary, /Worker Node 已在本机完成执行/);
-    assert.equal(result.touchedFiles?.length, 1);
+    assert.equal(result.touchedFiles?.length, 4);
     const reportFile = result.touchedFiles?.[0];
     assert.ok(reportFile);
 
@@ -123,6 +132,9 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
     assert.equal(report.workspace.path, workspacePath);
     assert.equal(report.workspace.entryCount, 1);
     assert.equal(report.executionContract.credentialId, "default");
+    assert.ok(report.runtime.contextFile.endsWith("/runtime-context.json"));
+    assert.ok(report.runtime.runtimeAuthFilePath.endsWith("/codex-home/auth.json"));
+    assert.ok(report.runtime.providerFile.endsWith("/provider.json"));
     assert.equal(report.git.isRepository, true);
     assert.equal(report.git.branch, "main");
     assert.equal(report.git.changedFileCount, 2);

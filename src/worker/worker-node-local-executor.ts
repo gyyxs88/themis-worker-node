@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { materializeWorkerNodeRuntimeContext } from "../runtime/worker-node-runtime-context.js";
 import type { WorkerNodeExecutor } from "./worker-node-daemon.js";
 import { WorkerNodeExecutionError } from "./worker-node-daemon.js";
 
@@ -29,6 +30,7 @@ export type WorkerNodeLocalExecutorCommandRunner = (
 export interface CreateLocalWorkerExecutorOptions {
   workingDirectory: string;
   reportRootDirectory?: string;
+  env?: NodeJS.ProcessEnv;
   now?: () => string;
   commandRunner?: WorkerNodeLocalExecutorCommandRunner;
 }
@@ -39,6 +41,7 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
     workingDirectory,
     options.reportRootDirectory ?? "infra/local/worker-runs",
   );
+  const env = options.env ?? process.env;
   const now = options.now ?? (() => new Date().toISOString());
   const commandRunner = options.commandRunner ?? runLocalCommand;
 
@@ -48,6 +51,17 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
       const workspacePath = resolveWorkspacePath(
         assignedRun.executionContract.workspacePath ?? workingDirectory,
       );
+      const runtimeContext = materializeWorkerNodeRuntimeContext({
+        workingDirectory,
+        env,
+        now,
+      }, {
+        runId: assignedRun.run.runId,
+        workspacePath,
+        credentialId: assignedRun.executionContract.credentialId ?? null,
+        providerId: assignedRun.executionContract.provider ?? null,
+        model: assignedRun.executionContract.model ?? null,
+      });
       const workspace = readWorkspaceSummary(workspacePath);
       const git = await readWorkspaceGitSummary(commandRunner, workspacePath);
       const completedAt = now();
@@ -57,6 +71,7 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
         workspacePath,
         workspaceEntryCount: workspace.entryCount,
         workspaceSampleEntries: workspace.sampleEntries,
+        runtimeContext,
         git,
         startedAt,
         completedAt,
@@ -68,6 +83,7 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
         output: {
           reportFile,
           workspacePath,
+          runtimeContextFile: runtimeContext.contextFile,
           gitRepository: git.isRepository,
           gitBranch: git.branch,
           changedFileCount: git.changedFileCount,
@@ -75,6 +91,7 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
         structuredOutput: {
           reportFile,
           workspacePath,
+          runtimeContext,
           workspaceEntryCount: workspace.entryCount,
           workspaceSampleEntries: workspace.sampleEntries,
           git,
@@ -82,7 +99,12 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
           provider: assignedRun.executionContract.provider ?? null,
           model: assignedRun.executionContract.model ?? null,
         },
-        touchedFiles: [reportFile],
+        touchedFiles: [
+          reportFile,
+          runtimeContext.contextFile,
+          ...(runtimeContext.runtimeAuthFilePath ? [runtimeContext.runtimeAuthFilePath] : []),
+          ...(runtimeContext.providerFile ? [runtimeContext.providerFile] : []),
+        ],
         completedAt,
       };
     },
@@ -204,6 +226,7 @@ function writeExecutionReport(input: {
   workspacePath: string;
   workspaceEntryCount: number;
   workspaceSampleEntries: string[];
+  runtimeContext: ReturnType<typeof materializeWorkerNodeRuntimeContext>;
   git: {
     isRepository: boolean;
     branch: string | null;
@@ -242,6 +265,18 @@ function writeExecutionReport(input: {
       path: input.workspacePath,
       entryCount: input.workspaceEntryCount,
       sampleEntries: input.workspaceSampleEntries,
+    },
+    runtime: {
+      contextFile: input.runtimeContext.contextFile,
+      runtimeAuthFilePath: input.runtimeContext.runtimeAuthFilePath,
+      providerFile: input.runtimeContext.providerFile,
+      credential: input.runtimeContext.credential
+        ? {
+            credentialId: input.runtimeContext.credential.credentialId,
+            codexHome: input.runtimeContext.credential.codexHome,
+          }
+        : null,
+      provider: input.runtimeContext.provider,
     },
     git: input.git,
   }, null, 2)}\n`, "utf8");
