@@ -17,6 +17,7 @@
 - `src/worker/worker-node-local-executor.ts` 已提供真实本机工作区检查、Git 摘要采集与 `report.json` 产出
 - `src/diagnostics/worker-node-diagnostics.ts` 已提供本地 `workspace / credential / provider` 与平台可达性预检
 - `src/cli/worker-node-main.ts` 已提供 `help`、`doctor worker-node`、`worker-node run --once` 与 `--report-root` 最小 CLI
+- `infra/systemd/themis-worker-node.service.example` 与 `docs/worker-node-systemd-service.md` 已随仓提供节点常驻模板和部署说明
 
 当前验证：
 
@@ -26,5 +27,4 @@
 
 当前下一顺序任务：
 
-- 迁入 `systemd` 模板与节点部署文档
 - 收口本地 runtime 与 `credential / provider` 装配

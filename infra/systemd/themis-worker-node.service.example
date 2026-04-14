@@ -1,0 +1,24 @@
+[Unit]
+Description=Themis worker node service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/services/themis-worker-node
+Environment="THEMIS_WORKER_PLATFORM=http://127.0.0.1:3100"
+Environment="THEMIS_WORKER_OWNER_PRINCIPAL=principal-owner"
+Environment="THEMIS_WORKER_TOKEN=replace-with-web-access-token"
+Environment="THEMIS_WORKER_NAME=worker-node-a"
+Environment="THEMIS_WORKER_NODE_ID=node-worker-a"
+Environment="THEMIS_WORKER_WORKSPACE=%h/services/themis-worker-node"
+Environment="THEMIS_WORKER_CREDENTIAL=default"
+Environment="THEMIS_WORKER_SLOT_CAPACITY=1"
+Environment="THEMIS_WORKER_REPORT_ROOT=%h/services/themis-worker-node/infra/local/worker-runs"
+ExecStart=%h/services/themis-worker-node/themis-worker-node worker-node run --platform ${THEMIS_WORKER_PLATFORM} --owner-principal ${THEMIS_WORKER_OWNER_PRINCIPAL} --token ${THEMIS_WORKER_TOKEN} --name ${THEMIS_WORKER_NAME} --node-id ${THEMIS_WORKER_NODE_ID} --workspace ${THEMIS_WORKER_WORKSPACE} --credential ${THEMIS_WORKER_CREDENTIAL} --slot-capacity ${THEMIS_WORKER_SLOT_CAPACITY} --report-root ${THEMIS_WORKER_REPORT_ROOT}
+Restart=always
+RestartSec=2
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target
