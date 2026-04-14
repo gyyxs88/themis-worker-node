@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 import { runWorkerNodeCli } from "./worker-node-main.js";
 
@@ -27,7 +29,46 @@ test("themis-worker-node help 会输出当前支持的最小命令", async () =>
 
   assert.equal(exitCode, 0);
   assert.match(stdout.read(), /Themis Worker Node CLI/);
+  assert.match(stdout.read(), /doctor worker-node/);
   assert.match(stdout.read(), /worker-node run/);
+});
+
+test("themis-worker-node doctor worker-node 会输出本地预检摘要", async () => {
+  const stdout = createBufferStream();
+  const stderr = createBufferStream();
+  const workspace = join(process.cwd(), "temp", `worker-node-doctor-${Date.now()}`);
+  const codexHome = join(workspace, "codex-home");
+  const oldCodexHome = process.env.CODEX_HOME;
+
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(join(codexHome, "auth.json"), "{\"token\":\"default\"}", "utf8");
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    const exitCode = await runWorkerNodeCli([
+      "doctor",
+      "worker-node",
+      "--workspace",
+      workspace,
+      "--credential",
+      "default",
+    ], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    assert.equal(exitCode, 0);
+    assert.match(stdout.read(), /Themis 诊断 - worker-node/);
+    assert.match(stdout.read(), /主诊断：Worker Node 预检通过/);
+  } finally {
+    if (oldCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = oldCodexHome;
+    }
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("themis-worker-node worker-node run --once 会执行最小闭环", async () => {

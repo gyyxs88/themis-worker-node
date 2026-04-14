@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from "node:url";
+import { WorkerNodeDiagnosticsService } from "../diagnostics/worker-node-diagnostics.js";
 import { PlatformWorkerClient } from "../platform/platform-worker-client.js";
 import { createEchoWorkerExecutor, WorkerNodeDaemon, type WorkerNodeExecutor } from "../worker/worker-node-daemon.js";
 
@@ -28,6 +29,11 @@ export async function runWorkerNodeCli(
   }
 
   if (command !== "worker-node" || subcommand !== "run") {
+    if (command === "doctor" && subcommand === "worker-node") {
+      await handleDoctorWorkerNode(parsed, stdout);
+      return 0;
+    }
+
     stderr.write(`不支持的命令：${argv.join(" ") || "(empty)"}\n`);
     writeHelp(stderr);
     return 1;
@@ -87,8 +93,9 @@ function writeHelp(output: NodeJS.WriteStream) {
   output.write("Themis Worker Node CLI\n");
   output.write("用法：\n");
   output.write("  themis-worker-node help\n");
+  output.write("  themis-worker-node doctor worker-node --platform <baseUrl> --owner-principal <principalId> --token <platformToken> --workspace <absolutePath>\n");
   output.write("  themis-worker-node worker-node run --platform <baseUrl> --owner-principal <principalId> --token <platformToken> --name <displayName> [--once]\n");
-  output.write("当前这一刀已迁入最小 daemon 常驻闭环；doctor worker-node 将在下一顺序任务继续补入。\n");
+  output.write("当前已迁入最小 daemon 闭环与 doctor worker-node 预检；真实本机执行器会在下一顺序任务继续补入。\n");
 }
 
 function parseCliArgs(argv: string[]) {
@@ -159,6 +166,65 @@ function readPositiveIntegerOption(options: Map<string, string[]>, name: string)
 
 function isDirectExecution() {
   return typeof process.argv[1] === "string" && import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+async function handleDoctorWorkerNode(
+  parsed: ReturnType<typeof parseCliArgs>,
+  stdout: NodeJS.WriteStream,
+) {
+  const workspaceCapabilities = readOptionalList(parsed.options, "--workspace");
+  const credentialCapabilities = readOptionalList(parsed.options, "--credential");
+  const providerCapabilities = readOptionalList(parsed.options, "--provider");
+  const diagnostics = new WorkerNodeDiagnosticsService({
+    workingDirectory: process.cwd(),
+  });
+  const summary = await diagnostics.readSummary({
+    workspaceCapabilities: workspaceCapabilities.length > 0 ? workspaceCapabilities : [process.cwd()],
+    credentialCapabilities,
+    providerCapabilities,
+    platformBaseUrl: readOptionalText(parsed.options, "--platform"),
+    ownerPrincipalId: readOptionalText(parsed.options, "--owner-principal"),
+    webAccessToken: readOptionalText(parsed.options, "--token"),
+  });
+
+  stdout.write("Themis 诊断 - worker-node\n");
+  stdout.write(`workspaceCount：${summary.workspaces.length}\n`);
+  for (const workspace of summary.workspaces) {
+    stdout.write(`workspace[${workspace.inputPath}]：${workspace.status}\n`);
+    if (workspace.inputPath !== workspace.resolvedPath) {
+      stdout.write(`  resolvedPath：${workspace.resolvedPath}\n`);
+    }
+  }
+  stdout.write(`credentialCount：${summary.credentials.length}\n`);
+  if (summary.credentials.length === 0) {
+    stdout.write("credential：<none>\n");
+  } else {
+    for (const credential of summary.credentials) {
+      stdout.write(`credential[${credential.credentialId}]：${credential.status} (codexHome=${credential.codexHome})\n`);
+    }
+  }
+  stdout.write(`providerCount：${summary.providers.length}\n`);
+  if (summary.providers.length === 0) {
+    stdout.write("provider：<none>\n");
+  } else {
+    for (const provider of summary.providers) {
+      stdout.write(`provider[${provider.providerId}]：${provider.status}${provider.source ? ` (source=${provider.source}, defaultModel=${provider.defaultModel ?? "<none>"})` : ""}\n`);
+      if (provider.message) {
+        stdout.write(`  message：${provider.message}\n`);
+      }
+    }
+  }
+  stdout.write(`platform.status：${summary.platform.status}\n`);
+  stdout.write(`platform.baseUrl：${summary.platform.baseUrl ?? "<none>"}\n`);
+  stdout.write(`platform.nodeCount：${summary.platform.nodeCount ?? "<none>"}\n`);
+  stdout.write(`platform.message：${summary.platform.message ?? "<none>"}\n`);
+  stdout.write("问题判断\n");
+  stdout.write(`主诊断：${summary.primaryDiagnosis.title}\n`);
+  stdout.write(`诊断摘要：${summary.primaryDiagnosis.summary}\n`);
+  stdout.write("建议动作：\n");
+  for (const [index, step] of summary.recommendedNextSteps.entries()) {
+    stdout.write(`${index + 1}. ${step}\n`);
+  }
 }
 
 if (isDirectExecution()) {
