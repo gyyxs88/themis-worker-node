@@ -6,6 +6,7 @@
 
 - 当前入口：`src/cli/worker-node-main.ts`
 - 当前状态：已落入最小 Worker daemon 骨架、平台 worker client、`worker-node run` CLI 与 `doctor worker-node` 预检，并开始通过 `file:../themis-contracts` 依赖消费共享节点协议契约
+- 当前状态：已落入最小 Worker daemon、平台 worker client、`doctor worker-node` 预检，以及会生成本地 report 的 `worker-node run` 执行器，并开始通过 `file:../themis-contracts` 依赖消费共享节点协议契约
 - 迁移依据：请对照 `themis` 主仓里的 `docs/repository/themis-three-layer-split-migration-checklist.md`
 
 当前最小能力：
@@ -13,8 +14,9 @@
 - `src/platform/platform-worker-access.ts` 已按共享契约装配 `nodes/register|heartbeat|list` 与 `worker/runs/pull|update|complete` 平台请求
 - `src/platform/platform-worker-client.ts` 已提供最小平台 worker client
 - `src/worker/worker-node-daemon.ts` 已提供 `register -> heartbeat -> pull -> execute -> report` 最小 daemon 闭环
+- `src/worker/worker-node-local-executor.ts` 已提供真实本机工作区检查、Git 摘要采集与 `report.json` 产出
 - `src/diagnostics/worker-node-diagnostics.ts` 已提供本地 `workspace / credential / provider` 与平台可达性预检
-- `src/cli/worker-node-main.ts` 已提供 `help`、`doctor worker-node` 与 `worker-node run --once` 最小 CLI
+- `src/cli/worker-node-main.ts` 已提供 `help`、`doctor worker-node`、`worker-node run --once` 与 `--report-root` 最小 CLI
 
 当前验证：
 
@@ -24,5 +26,5 @@
 
 当前下一顺序任务：
 
-- 把当前 echo executor 继续换成真实本机执行链
-- 细化 `execute -> report` 的本地产物与回传摘要
+- 迁入 `systemd` 模板与节点部署文档
+- 收口本地 runtime 与 `credential / provider` 装配

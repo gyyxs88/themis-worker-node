@@ -126,6 +126,8 @@ test("WorkerNodeDaemon 会执行 register -> heartbeat -> pull -> complete 最�
     nodeId: "node-alpha",
     executedRunId: "run-alpha",
     result: "completed",
+    summary: "Worker Node 已完成任务。",
+    reportFile: null,
   });
   assert.equal(calls[0]?.[0], "registerNode");
   assert.equal(calls[1]?.[0], "heartbeatNode");

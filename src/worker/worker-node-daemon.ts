@@ -61,6 +61,8 @@ export interface WorkerNodeDaemonRunResult {
   nodeId: string;
   executedRunId: string | null;
   result: "idle" | "completed" | "waiting_action" | "failed" | "cancelled";
+  summary?: string;
+  reportFile?: string | null;
 }
 
 export class WorkerNodeExecutionError extends Error {
@@ -192,6 +194,8 @@ export class WorkerNodeDaemon {
           nodeId,
           executedRunId: assignedRun.run.runId,
           result: "completed",
+          summary: executionResult.summary,
+          reportFile: resolveReportFile(executionResult),
         };
       }
 
@@ -208,6 +212,7 @@ export class WorkerNodeDaemon {
           nodeId,
           executedRunId: assignedRun.run.runId,
           result: "cancelled",
+          summary: executionResult.summary,
         };
       }
 
@@ -222,6 +227,7 @@ export class WorkerNodeDaemon {
         nodeId,
         executedRunId: assignedRun.run.runId,
         result: "waiting_action",
+        summary: executionResult.summary,
       };
     } catch (error) {
       const failureMessage = toErrorMessage(error);
@@ -239,6 +245,7 @@ export class WorkerNodeDaemon {
         nodeId,
         executedRunId: assignedRun.run.runId,
         result: "failed",
+        summary: failureMessage,
       };
     } finally {
       await this.client.heartbeatNode({
@@ -332,4 +339,26 @@ function normalizePositiveInteger(value: number | null | undefined) {
 
 function toErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function resolveReportFile(result: WorkerNodeExecutorCompletedResult) {
+  const outputReportFile = readReportFileField(result.output);
+
+  if (outputReportFile) {
+    return outputReportFile;
+  }
+
+  return readReportFileField(result.structuredOutput);
+}
+
+function readReportFileField(value: unknown) {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  if (!("reportFile" in value) || typeof value.reportFile !== "string" || !value.reportFile.trim()) {
+    return null;
+  }
+
+  return value.reportFile.trim();
 }

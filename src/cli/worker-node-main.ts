@@ -3,7 +3,8 @@
 import { pathToFileURL } from "node:url";
 import { WorkerNodeDiagnosticsService } from "../diagnostics/worker-node-diagnostics.js";
 import { PlatformWorkerClient } from "../platform/platform-worker-client.js";
-import { createEchoWorkerExecutor, WorkerNodeDaemon, type WorkerNodeExecutor } from "../worker/worker-node-daemon.js";
+import { WorkerNodeDaemon, type WorkerNodeExecutor } from "../worker/worker-node-daemon.js";
+import { createLocalWorkerExecutor } from "../worker/worker-node-local-executor.js";
 
 export interface RunWorkerNodeCliOptions {
   stdout?: NodeJS.WriteStream;
@@ -11,6 +12,8 @@ export interface RunWorkerNodeCliOptions {
   fetchImpl?: typeof fetch;
   executor?: WorkerNodeExecutor;
   signal?: AbortSignal;
+  workingDirectory?: string;
+  reportRootDirectory?: string;
 }
 
 export async function runWorkerNodeCli(
@@ -19,6 +22,7 @@ export async function runWorkerNodeCli(
 ): Promise<number> {
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
+  const workingDirectory = options.workingDirectory ?? process.cwd();
   const parsed = parseCliArgs(argv);
   const command = parsed.positionals[0] ?? "help";
   const subcommand = parsed.positionals[1] ?? "";
@@ -30,7 +34,7 @@ export async function runWorkerNodeCli(
 
   if (command !== "worker-node" || subcommand !== "run") {
     if (command === "doctor" && subcommand === "worker-node") {
-      await handleDoctorWorkerNode(parsed, stdout);
+      await handleDoctorWorkerNode(parsed, stdout, workingDirectory);
       return 0;
     }
 
@@ -53,7 +57,10 @@ export async function runWorkerNodeCli(
   });
   const daemon = new WorkerNodeDaemon({
     client,
-    executor: options.executor ?? createEchoWorkerExecutor(),
+    executor: options.executor ?? createLocalWorkerExecutor({
+      workingDirectory,
+      reportRootDirectory: readOptionalText(parsed.options, "--report-root") ?? options.reportRootDirectory ?? undefined,
+    }),
     node: {
       ...(readOptionalText(parsed.options, "--node-id") ? { nodeId: readOptionalText(parsed.options, "--node-id") ?? undefined } : {}),
       ...(readOptionalText(parsed.options, "--organization") ? { organizationId: readOptionalText(parsed.options, "--organization") ?? undefined } : {}),
@@ -80,6 +87,12 @@ export async function runWorkerNodeCli(
     const result = await daemon.runOnce();
     stdout.write(`Worker Node：${result.nodeId}\n`);
     stdout.write(`执行结果：${result.result}\n`);
+    if (result.summary) {
+      stdout.write(`执行摘要：${result.summary}\n`);
+    }
+    if (result.reportFile) {
+      stdout.write(`报告文件：${result.reportFile}\n`);
+    }
     return 0;
   }
 
@@ -94,8 +107,8 @@ function writeHelp(output: NodeJS.WriteStream) {
   output.write("用法：\n");
   output.write("  themis-worker-node help\n");
   output.write("  themis-worker-node doctor worker-node --platform <baseUrl> --owner-principal <principalId> --token <platformToken> --workspace <absolutePath>\n");
-  output.write("  themis-worker-node worker-node run --platform <baseUrl> --owner-principal <principalId> --token <platformToken> --name <displayName> [--once]\n");
-  output.write("当前已迁入最小 daemon 闭环与 doctor worker-node 预检；真实本机执行器会在下一顺序任务继续补入。\n");
+  output.write("  themis-worker-node worker-node run --platform <baseUrl> --owner-principal <principalId> --token <platformToken> --name <displayName> [--report-root <path>] [--once]\n");
+  output.write("当前已迁入最小 daemon 闭环、doctor worker-node 预检，以及会生成本地 report 的执行器；更完整 runtime 执行链会在后续顺序任务继续补入。\n");
 }
 
 function parseCliArgs(argv: string[]) {
@@ -171,15 +184,16 @@ function isDirectExecution() {
 async function handleDoctorWorkerNode(
   parsed: ReturnType<typeof parseCliArgs>,
   stdout: NodeJS.WriteStream,
+  workingDirectory: string,
 ) {
   const workspaceCapabilities = readOptionalList(parsed.options, "--workspace");
   const credentialCapabilities = readOptionalList(parsed.options, "--credential");
   const providerCapabilities = readOptionalList(parsed.options, "--provider");
   const diagnostics = new WorkerNodeDiagnosticsService({
-    workingDirectory: process.cwd(),
+    workingDirectory,
   });
   const summary = await diagnostics.readSummary({
-    workspaceCapabilities: workspaceCapabilities.length > 0 ? workspaceCapabilities : [process.cwd()],
+    workspaceCapabilities: workspaceCapabilities.length > 0 ? workspaceCapabilities : [workingDirectory],
     credentialCapabilities,
     providerCapabilities,
     platformBaseUrl: readOptionalText(parsed.options, "--platform"),
