@@ -79,16 +79,20 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
   const root = join(tmpdir(), `themis-worker-node-local-executor-${Date.now()}`);
   const workspacePath = join(root, "workspace");
   const codexHome = join(root, "codex-home");
+  const codexBin = join(root, "bin", "codex");
   mkdirSync(workspacePath, { recursive: true });
   mkdirSync(codexHome, { recursive: true });
+  mkdirSync(join(root, "bin"), { recursive: true });
   writeFileSync(join(workspacePath, "README.md"), "# worker\n", "utf8");
   writeFileSync(join(codexHome, "auth.json"), "{\"token\":\"default\"}\n", "utf8");
+  writeFileSync(codexBin, "#!/bin/sh\n", "utf8");
 
   const commands: Array<{ command: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }> = [];
   const executor = createLocalWorkerExecutor({
     workingDirectory: root,
     env: {
       CODEX_HOME: codexHome,
+      THEMIS_WORKER_CODEX_BIN: codexBin,
       THEMIS_PROVIDER_OPENAI_BASE_URL: "https://api.openai.example.com",
       THEMIS_PROVIDER_OPENAI_API_KEY: "provider-secret",
       THEMIS_PROVIDER_OPENAI_MODEL: "gpt-5.4",
@@ -117,7 +121,7 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
         };
       }
 
-      if (command === "codex" && args[0] === "exec") {
+      if (command === codexBin && args[0] === "exec") {
         const outputFile = args[args.indexOf("-o") + 1];
         assert.ok(outputFile);
         writeFileSync(String(outputFile), JSON.stringify({
@@ -177,7 +181,7 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
       `git status --short @ ${workspacePath}`,
     ]);
     const codexArgs = commands[3]?.args ?? [];
-    assert.equal(commands[3]?.command, "codex");
+    assert.equal(commands[3]?.command, codexBin);
     assert.ok(codexArgs.includes("--disable"));
     assert.ok(codexArgs.includes("--output-schema"));
     assert.ok(codexArgs.includes("--model"));

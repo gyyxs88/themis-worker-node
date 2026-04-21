@@ -103,6 +103,7 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
       const git = await readWorkspaceGitSummary(commandRunner, workspacePath);
       const codexExecution = await runCodexExecution({
         assignedRun,
+        workingDirectory,
         workspacePath,
         runtimeContext,
         reportDirectory,
@@ -289,6 +290,7 @@ async function readWorkspaceGitSummary(
 
 async function runCodexExecution(input: {
   assignedRun: Parameters<WorkerNodeExecutor["execute"]>[0]["assignedRun"];
+  workingDirectory: string;
   workspacePath: string;
   runtimeContext: ReturnType<typeof materializeWorkerNodeRuntimeContext>;
   reportDirectory: string;
@@ -309,6 +311,7 @@ async function runCodexExecution(input: {
 
   const providerConfig = readProviderConfig(input.runtimeContext.providerFile);
   const codexEnv = buildCodexExecutionEnv(input.env, input.runtimeContext, providerConfig);
+  const codexCommand = resolveCodexCommand(input.workingDirectory, input.env);
   const args = buildCodexExecArgs({
     workspacePath: input.workspacePath,
     outputFile,
@@ -316,7 +319,7 @@ async function runCodexExecution(input: {
     prompt,
     providerConfig,
   });
-  const commandResult = await input.commandRunner("codex", args, {
+  const commandResult = await input.commandRunner(codexCommand, args, {
     cwd: input.workspacePath,
     timeoutMs: resolveCodexCommandTimeoutMs(input.env),
     env: codexEnv,
@@ -723,6 +726,25 @@ function firstNonEmptyLine(value: string) {
 
 function normalizeOptionalText(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function resolveCodexCommand(workingDirectory: string, env: NodeJS.ProcessEnv) {
+  const explicitCommand = normalizeOptionalText(env.THEMIS_WORKER_CODEX_BIN);
+  const candidates = [
+    explicitCommand,
+    resolve(workingDirectory, "node_modules/.bin/codex"),
+    resolve(workingDirectory, "../themis-prod/node_modules/.bin/codex"),
+    resolve(workingDirectory, "../themis/node_modules/.bin/codex"),
+    resolve(workingDirectory, "../themis-main/node_modules/.bin/codex"),
+  ].filter((value): value is string => Boolean(value));
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return explicitCommand ?? "codex";
 }
 
 function resolveCodexCommandTimeoutMs(env: NodeJS.ProcessEnv) {
