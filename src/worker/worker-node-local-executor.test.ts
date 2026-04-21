@@ -84,7 +84,7 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
   writeFileSync(join(workspacePath, "README.md"), "# worker\n", "utf8");
   writeFileSync(join(codexHome, "auth.json"), "{\"token\":\"default\"}\n", "utf8");
 
-  const commands: string[] = [];
+  const commands: Array<{ command: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }> = [];
   const executor = createLocalWorkerExecutor({
     workingDirectory: root,
     env: {
@@ -95,7 +95,12 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
     },
     now: () => "2026-04-14T12:30:00.000Z",
     commandRunner: async (command, args, input) => {
-      commands.push(`${command} ${args.join(" ")} @ ${input.cwd}`);
+      commands.push({
+        command,
+        args,
+        cwd: input.cwd,
+        env: input.env,
+      });
 
       if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
         return { stdout: "true\n", stderr: "" };
@@ -112,6 +117,25 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
         };
       }
 
+      if (command === "codex" && args[0] === "exec") {
+        const outputFile = args[args.indexOf("-o") + 1];
+        assert.ok(outputFile);
+        writeFileSync(String(outputFile), JSON.stringify({
+          summary: "已完成 worker 真实执行闭环。",
+          deliverable: "这里是完整交付正文。",
+          artifactPaths: ["reports/final.md"],
+          followUp: ["继续观察线上回传是否稳定。"],
+        }, null, 2), "utf8");
+        assert.equal(input.cwd, workspacePath);
+        assert.ok(input.env?.HOME?.endsWith("/infra/local/worker-runtime/run-alpha/home"));
+        assert.ok(input.env?.CODEX_HOME?.endsWith("/infra/local/worker-runtime/run-alpha/codex-home"));
+        assert.equal(input.env?.THEMIS_OPENAI_COMPAT_API_KEY, "provider-secret");
+        return {
+          stdout: "codex\nexecution complete\n",
+          stderr: "model manager warmup warning\n",
+        };
+      }
+
       throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
     },
   });
@@ -122,13 +146,21 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
     });
 
     assert.equal(result.kind, "completed");
-    assert.match(result.summary, /Worker Node 已在本机完成执行/);
-    assert.equal(result.touchedFiles?.length, 4);
+    assert.equal(result.summary, "已完成 worker 真实执行闭环。");
+    assert.equal(result.touchedFiles?.length, 10);
     const reportFile = result.touchedFiles?.[0];
     assert.ok(reportFile);
 
     const report = JSON.parse(readFileSync(reportFile, "utf8")) as Record<string, any>;
     assert.equal(report.run.runId, "run-alpha");
+    assert.equal(report.result.summary, "已完成 worker 真实执行闭环。");
+    assert.equal(report.result.deliverable, "这里是完整交付正文。");
+    assert.deepEqual(report.result.artifactPaths, ["reports/final.md"]);
+    assert.deepEqual(report.result.followUp, ["继续观察线上回传是否稳定。"]);
+    assert.ok(report.codex.promptFile.endsWith("/prompt.txt"));
+    assert.ok(report.codex.outputFile.endsWith("/last-message.txt"));
+    assert.ok(report.codex.resultFile.endsWith("/result.json"));
+    assert.ok(report.codex.deliverableFile.endsWith("/deliverable.md"));
     assert.equal(report.workspace.path, workspacePath);
     assert.equal(report.workspace.entryCount, 1);
     assert.equal(report.executionContract.credentialId, "default");
@@ -138,11 +170,21 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
     assert.equal(report.git.isRepository, true);
     assert.equal(report.git.branch, "main");
     assert.equal(report.git.changedFileCount, 2);
-    assert.deepEqual(commands, [
+    assert.equal(commands.length, 4);
+    assert.deepEqual(commands.slice(0, 3).map((entry) => `${entry.command} ${entry.args.join(" ")} @ ${entry.cwd}`), [
       `git rev-parse --is-inside-work-tree @ ${workspacePath}`,
       `git rev-parse --abbrev-ref HEAD @ ${workspacePath}`,
       `git status --short @ ${workspacePath}`,
     ]);
+    const codexArgs = commands[3]?.args ?? [];
+    assert.equal(commands[3]?.command, "codex");
+    assert.ok(codexArgs.includes("--disable"));
+    assert.ok(codexArgs.includes("--output-schema"));
+    assert.ok(codexArgs.includes("--model"));
+    const resultOutput = result.output as Record<string, unknown> | undefined;
+    assert.equal(resultOutput?.reportFile, reportFile);
+    assert.ok(String(resultOutput?.deliverableFile ?? "").endsWith("/deliverable.md"));
+    assert.equal((result.structuredOutput as Record<string, unknown>)?.summary, "已完成 worker 真实执行闭环。");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

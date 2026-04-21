@@ -31,12 +31,16 @@ test("materializeWorkerNodeRuntimeContext 会落本地 runtime context / auth / 
     });
 
     assert.ok(result.contextFile.endsWith("/runtime-context.json"));
+    assert.ok(result.codexHome.endsWith("/codex-home"));
+    assert.ok(result.homeDirectory.endsWith("/home"));
     assert.ok(result.runtimeAuthFilePath?.endsWith("/codex-home/auth.json"));
     assert.ok(result.providerFile?.endsWith("/provider.json"));
 
     const runtimeContext = JSON.parse(readFileSync(result.contextFile, "utf8")) as Record<string, any>;
     const provider = JSON.parse(readFileSync(result.providerFile ?? "", "utf8")) as Record<string, any>;
     assert.equal(runtimeContext.workspacePath, "/srv/platform-alpha");
+    assert.equal(runtimeContext.codexHome, result.codexHome);
+    assert.equal(runtimeContext.homeDirectory, result.homeDirectory);
     assert.equal(runtimeContext.credential.credentialId, "default");
     assert.equal(runtimeContext.provider.providerId, "openai");
     assert.equal(provider.effectiveModel, "gpt-5.4-mini");
@@ -74,6 +78,32 @@ test("materializeWorkerNodeRuntimeContext 会在 credential / provider 缺失时
     }), (error) =>
       error instanceof WorkerNodeExecutionError
       && error.failureCode === "WORKER_NODE_PROVIDER_MISSING");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("materializeWorkerNodeRuntimeContext 在未显式指定 credentialId 时会复用默认 auth", () => {
+  const root = join(tmpdir(), `themis-worker-runtime-context-default-${Date.now()}`);
+  const codexHome = join(root, "codex-home");
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(join(codexHome, "auth.json"), "{\"token\":\"default\"}\n", "utf8");
+
+  try {
+    const result = materializeWorkerNodeRuntimeContext({
+      workingDirectory: root,
+      env: {
+        CODEX_HOME: codexHome,
+      },
+      now: () => "2026-04-14T13:31:00.000Z",
+    }, {
+      runId: "run-default",
+      workspacePath: "/srv/platform-default",
+    });
+
+    assert.equal(result.credential?.credentialId, "default");
+    assert.ok(result.runtimeAuthFilePath?.endsWith("/codex-home/auth.json"));
+    assert.equal(readFileSync(result.runtimeAuthFilePath ?? "", "utf8"), "{\"token\":\"default\"}\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

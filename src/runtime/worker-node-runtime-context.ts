@@ -23,6 +23,8 @@ export interface MaterializeWorkerNodeRuntimeContextInput {
 
 export interface WorkerNodeMaterializedRuntimeContext {
   runtimeRoot: string;
+  codexHome: string;
+  homeDirectory: string;
   contextFile: string;
   runtimeAuthFilePath: string | null;
   providerFile: string | null;
@@ -46,17 +48,22 @@ export function materializeWorkerNodeRuntimeContext(
   const env = options.env ?? process.env;
   const now = options.now ?? (() => new Date().toISOString());
   const runtimeRoot = join(workingDirectory, "infra/local/worker-runtime", input.runId);
+  const runtimeCodexHome = join(runtimeRoot, "codex-home");
+  const homeDirectory = join(runtimeRoot, "home");
   mkdirSync(runtimeRoot, { recursive: true });
+  mkdirSync(runtimeCodexHome, { recursive: true });
+  mkdirSync(homeDirectory, { recursive: true });
 
   let runtimeAuthFilePath: string | null = null;
   let providerFile: string | null = null;
   let credential: WorkerNodeMaterializedRuntimeContext["credential"] = null;
   let provider: WorkerNodeMaterializedRuntimeContext["provider"] = null;
 
-  const credentialId = normalizeOptionalText(input.credentialId);
+  const requestedCredentialId = normalizeOptionalText(input.credentialId);
+  const effectiveCredentialId = requestedCredentialId ?? "default";
 
-  if (credentialId) {
-    const resolved = resolveWorkerNodeCredential(workingDirectory, env, credentialId);
+  if (requestedCredentialId) {
+    const resolved = resolveWorkerNodeCredential(workingDirectory, env, effectiveCredentialId);
 
     if (resolved.status !== "ok") {
       throw new WorkerNodeExecutionError(
@@ -65,15 +72,25 @@ export function materializeWorkerNodeRuntimeContext(
       );
     }
 
-    const runtimeCodexHome = join(runtimeRoot, "codex-home");
     runtimeAuthFilePath = join(runtimeCodexHome, "auth.json");
-    mkdirSync(runtimeCodexHome, { recursive: true });
     copyFileSync(resolved.authFilePath, runtimeAuthFilePath);
     credential = {
-      credentialId,
+      credentialId: effectiveCredentialId,
       codexHome: resolved.codexHome,
       authFilePath: resolved.authFilePath,
     };
+  } else {
+    const resolvedDefaultCredential = resolveWorkerNodeCredential(workingDirectory, env, effectiveCredentialId);
+
+    if (resolvedDefaultCredential.status === "ok") {
+      runtimeAuthFilePath = join(runtimeCodexHome, "auth.json");
+      copyFileSync(resolvedDefaultCredential.authFilePath, runtimeAuthFilePath);
+      credential = {
+        credentialId: effectiveCredentialId,
+        codexHome: resolvedDefaultCredential.codexHome,
+        authFilePath: resolvedDefaultCredential.authFilePath,
+      };
+    }
   }
 
   const providerId = normalizeOptionalText(input.providerId);
@@ -108,6 +125,8 @@ export function materializeWorkerNodeRuntimeContext(
     generatedAt: now(),
     runId: input.runId,
     workspacePath: input.workspacePath,
+    codexHome: runtimeCodexHome,
+    homeDirectory,
     runtimeAuthFilePath,
     providerFile,
     credential,
@@ -116,6 +135,8 @@ export function materializeWorkerNodeRuntimeContext(
 
   return {
     runtimeRoot,
+    codexHome: runtimeCodexHome,
+    homeDirectory,
     contextFile,
     runtimeAuthFilePath,
     providerFile,

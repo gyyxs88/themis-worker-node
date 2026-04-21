@@ -206,6 +206,17 @@ test("themis-worker-node worker-node run --once 会执行最小闭环", async ()
           },
         });
       },
+      executor: {
+        async execute() {
+          return {
+            kind: "completed",
+            summary: "CLI 测试执行完成。",
+            output: {
+              reportFile: join(reportRoot, "run-alpha", "report.json"),
+            },
+          };
+        },
+      },
     });
 
     assert.equal(exitCode, 0);
@@ -215,11 +226,9 @@ test("themis-worker-node worker-node run --once 会执行最小闭环", async ()
     assert.ok(requests.some((request) => request.url.endsWith("/api/platform/nodes/register")));
     const completeRequest = requests.find((request) => request.url.endsWith("/api/platform/worker/runs/complete"));
     assert.ok(completeRequest);
+    assert.equal((completeRequest?.body.result as Record<string, unknown> | undefined)?.summary, "CLI 测试执行完成。");
     const reportFile = String(((completeRequest?.body.result as Record<string, unknown> | undefined)?.output as Record<string, unknown> | undefined)?.reportFile ?? "");
     assert.ok(reportFile.endsWith("/report.json"));
-    const report = JSON.parse(readFileSync(reportFile, "utf8")) as Record<string, any>;
-    assert.equal(report.workspace.path, workspace);
-    assert.equal(report.run.runId, "run-alpha");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
