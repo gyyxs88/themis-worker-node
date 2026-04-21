@@ -188,7 +188,22 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
     const resultOutput = result.output as Record<string, unknown> | undefined;
     assert.equal(resultOutput?.reportFile, reportFile);
     assert.ok(String(resultOutput?.deliverableFile ?? "").endsWith("/deliverable.md"));
-    assert.equal((result.structuredOutput as Record<string, unknown>)?.summary, "已完成 worker 真实执行闭环。");
+    const structuredOutput = result.structuredOutput as Record<string, unknown> | undefined;
+    assert.equal(structuredOutput?.summary, "已完成 worker 真实执行闭环。");
+    const artifactContents = structuredOutput?.artifactContents as Record<string, any> | undefined;
+    assert.equal(artifactContents?.prompt?.label, "执行 prompt");
+    assert.match(String(artifactContents?.prompt?.content ?? ""), /验证 worker 本机执行器会生成 report/);
+    assert.equal(artifactContents?.prompt?.truncated, false);
+    assert.equal(artifactContents?.result?.mediaType, "application/json");
+    assert.match(String(artifactContents?.result?.content ?? ""), /"deliverable": "这里是完整交付正文。"/);
+    assert.equal(artifactContents?.deliverable?.mediaType, "text/markdown");
+    assert.match(String(artifactContents?.deliverable?.content ?? ""), /这里是完整交付正文/);
+    assert.equal(artifactContents?.report?.mediaType, "application/json");
+    assert.match(String(artifactContents?.report?.content ?? ""), /"git":/);
+    assert.equal(artifactContents?.stdout?.mediaType, "text/plain");
+    assert.match(String(artifactContents?.stdout?.content ?? ""), /execution complete/);
+    assert.equal(artifactContents?.stderr?.mediaType, "text/plain");
+    assert.match(String(artifactContents?.stderr?.content ?? ""), /warmup warning/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

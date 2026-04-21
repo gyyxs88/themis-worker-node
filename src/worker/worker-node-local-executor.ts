@@ -8,6 +8,7 @@ import { WorkerNodeExecutionError } from "./worker-node-daemon.js";
 const DEFAULT_GIT_COMMAND_TIMEOUT_MS = 2_000;
 const DEFAULT_CODEX_COMMAND_TIMEOUT_MS = 20 * 60 * 1_000;
 const DEFAULT_COMMAND_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+const DEFAULT_EMBEDDED_ARTIFACT_MAX_BYTES = 128 * 1024;
 const MAX_WORKSPACE_SAMPLE_ENTRIES = 20;
 const MAX_GIT_STATUS_LINES = 20;
 const COMPLETION_SCHEMA_VERSION = 1;
@@ -55,17 +56,29 @@ interface WorkerNodeProviderConfig {
 }
 
 interface WorkerNodeCodexExecutionResult extends WorkerNodeCodexStructuredResult {
+  prompt: string;
   promptFile: string;
   outputFile: string;
   resultFile: string;
   deliverableFile: string;
   stdoutLogFile: string;
   stderrLogFile: string;
+  resultJson: string;
+  deliverableContent: string;
   rawResponse: string;
   stdout: string;
   stderr: string;
   resolvedArtifactPaths: string[];
   completedAt: string;
+}
+
+interface WorkerNodeEmbeddedArtifactSnapshot {
+  label: string;
+  filePath: string;
+  mediaType: string;
+  content: string;
+  truncated: boolean;
+  byteLength: number;
 }
 
 export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOptions): WorkerNodeExecutor {
@@ -122,6 +135,11 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
         startedAt,
         completedAt,
       });
+      const artifactContents = buildExecutionArtifactContents({
+        codexExecution,
+        reportFile,
+        reportJson: readTextFileOrEmpty(reportFile),
+      });
 
       return {
         kind: "completed",
@@ -158,6 +176,7 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
           credentialId: assignedRun.executionContract.credentialId ?? null,
           provider: assignedRun.executionContract.provider ?? null,
           model: assignedRun.executionContract.model ?? null,
+          artifactContents,
         },
         touchedFiles: [
           reportFile,
@@ -333,21 +352,25 @@ async function runCodexExecution(input: {
     .map((artifactPath) => resolveArtifactPath(input.workspacePath, artifactPath))
     .filter((artifactPath): artifactPath is string => Boolean(artifactPath));
   const deliverableContent = buildDeliverableDocument(structuredResult);
-  writeFileSync(deliverableFile, `${deliverableContent}\n`, "utf8");
-  writeFileSync(resultFile, `${JSON.stringify({
+  const resultJson = `${JSON.stringify({
     schemaVersion: COMPLETION_SCHEMA_VERSION,
     ...structuredResult,
     resolvedArtifactPaths,
-  }, null, 2)}\n`, "utf8");
+  }, null, 2)}\n`;
+  writeFileSync(deliverableFile, `${deliverableContent}\n`, "utf8");
+  writeFileSync(resultFile, resultJson, "utf8");
 
   return {
     ...structuredResult,
+    prompt,
     promptFile,
     outputFile,
     resultFile,
     deliverableFile,
     stdoutLogFile,
     stderrLogFile,
+    resultJson,
+    deliverableContent,
     rawResponse,
     stdout: commandResult.stdout,
     stderr: commandResult.stderr,
@@ -434,6 +457,105 @@ function writeExecutionReport(input: {
     git: input.git,
   }, null, 2)}\n`, "utf8");
   return reportFile;
+}
+
+function buildExecutionArtifactContents(input: {
+  codexExecution: WorkerNodeCodexExecutionResult;
+  reportFile: string;
+  reportJson: string;
+}): Record<string, WorkerNodeEmbeddedArtifactSnapshot> {
+  return {
+    prompt: createEmbeddedArtifactSnapshot({
+      label: "执行 prompt",
+      filePath: input.codexExecution.promptFile,
+      mediaType: "text/plain",
+      content: `${input.codexExecution.prompt}\n`,
+    }),
+    output: createEmbeddedArtifactSnapshot({
+      label: "Codex 最后输出",
+      filePath: input.codexExecution.outputFile,
+      mediaType: "text/plain",
+      content: input.codexExecution.rawResponse,
+    }),
+    result: createEmbeddedArtifactSnapshot({
+      label: "结构化结果",
+      filePath: input.codexExecution.resultFile,
+      mediaType: "application/json",
+      content: input.codexExecution.resultJson,
+    }),
+    deliverable: createEmbeddedArtifactSnapshot({
+      label: "交付正文",
+      filePath: input.codexExecution.deliverableFile,
+      mediaType: "text/markdown",
+      content: `${input.codexExecution.deliverableContent}\n`,
+    }),
+    report: createEmbeddedArtifactSnapshot({
+      label: "执行报告",
+      filePath: input.reportFile,
+      mediaType: "application/json",
+      content: input.reportJson,
+    }),
+    stdout: createEmbeddedArtifactSnapshot({
+      label: "标准输出",
+      filePath: input.codexExecution.stdoutLogFile,
+      mediaType: "text/plain",
+      content: input.codexExecution.stdout,
+    }),
+    stderr: createEmbeddedArtifactSnapshot({
+      label: "标准错误",
+      filePath: input.codexExecution.stderrLogFile,
+      mediaType: "text/plain",
+      content: input.codexExecution.stderr,
+    }),
+  };
+}
+
+function createEmbeddedArtifactSnapshot(input: {
+  label: string;
+  filePath: string;
+  mediaType: string;
+  content: string;
+}): WorkerNodeEmbeddedArtifactSnapshot {
+  const normalizedContent = typeof input.content === "string" ? input.content : "";
+  const byteLength = Buffer.byteLength(normalizedContent, "utf8");
+  const truncatedContent = truncateUtf8Text(normalizedContent, DEFAULT_EMBEDDED_ARTIFACT_MAX_BYTES);
+
+  return {
+    label: input.label,
+    filePath: input.filePath,
+    mediaType: input.mediaType,
+    content: truncatedContent.content,
+    truncated: truncatedContent.truncated,
+    byteLength,
+  };
+}
+
+function truncateUtf8Text(
+  content: string,
+  maxBytes: number,
+): {
+  content: string;
+  truncated: boolean;
+} {
+  const buffer = Buffer.from(content, "utf8");
+
+  if (buffer.length <= maxBytes) {
+    return {
+      content,
+      truncated: false,
+    };
+  }
+
+  let truncated = buffer.subarray(0, maxBytes).toString("utf8");
+
+  while (truncated.endsWith("\uFFFD")) {
+    truncated = truncated.slice(0, -1);
+  }
+
+  return {
+    content: truncated,
+    truncated: true,
+  };
 }
 
 async function runLocalCommand(
