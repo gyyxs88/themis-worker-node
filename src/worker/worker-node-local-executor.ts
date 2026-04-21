@@ -1,12 +1,10 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { promisify } from "node:util";
 import { materializeWorkerNodeRuntimeContext } from "../runtime/worker-node-runtime-context.js";
 import type { WorkerNodeExecutor } from "./worker-node-daemon.js";
 import { WorkerNodeExecutionError } from "./worker-node-daemon.js";
 
-const execFileAsync = promisify(execFile);
 const DEFAULT_GIT_COMMAND_TIMEOUT_MS = 2_000;
 const DEFAULT_CODEX_COMMAND_TIMEOUT_MS = 20 * 60 * 1_000;
 const DEFAULT_COMMAND_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
@@ -443,17 +441,71 @@ async function runLocalCommand(
   args: string[],
   input: WorkerNodeLocalExecutorCommandInput,
 ): Promise<WorkerNodeLocalExecutorCommandResult> {
-  const result = await execFileAsync(command, args, {
-    cwd: input.cwd,
-    timeout: input.timeoutMs,
-    env: input.env,
-    maxBuffer: input.maxBufferBytes ?? DEFAULT_COMMAND_MAX_BUFFER_BYTES,
-  });
+  const maxBufferBytes = input.maxBufferBytes ?? DEFAULT_COMMAND_MAX_BUFFER_BYTES;
 
-  return {
-    stdout: typeof result.stdout === "string" ? result.stdout : String(result.stdout ?? ""),
-    stderr: typeof result.stderr === "string" ? result.stderr : String(result.stderr ?? ""),
-  };
+  return await new Promise<WorkerNodeLocalExecutorCommandResult>((resolvePromise, rejectPromise) => {
+    const child = spawn(command, args, {
+      cwd: input.cwd,
+      env: input.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finalize = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutHandle);
+      callback();
+    };
+
+    const fail = (error: Error) => {
+      if (!child.killed) {
+        child.kill("SIGTERM");
+      }
+      finalize(() => rejectPromise(error));
+    };
+
+    const timeoutHandle = setTimeout(() => {
+      fail(new Error(`Command timed out after ${input.timeoutMs}ms: ${command} ${args.join(" ")}`));
+    }, input.timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      if (Buffer.byteLength(stdout, "utf8") + Buffer.byteLength(stderr, "utf8") > maxBufferBytes) {
+        fail(new Error(`Command output exceeded ${maxBufferBytes} bytes: ${command} ${args.join(" ")}`));
+      }
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+      if (Buffer.byteLength(stdout, "utf8") + Buffer.byteLength(stderr, "utf8") > maxBufferBytes) {
+        fail(new Error(`Command output exceeded ${maxBufferBytes} bytes: ${command} ${args.join(" ")}`));
+      }
+    });
+
+    child.on("error", (error) => {
+      finalize(() => rejectPromise(error));
+    });
+
+    child.on("close", (code, signal) => {
+      if (settled) {
+        return;
+      }
+
+      if (code === 0) {
+        finalize(() => resolvePromise({ stdout, stderr }));
+        return;
+      }
+
+      const signalLabel = signal ? ` (signal ${signal})` : "";
+      const detail = firstNonEmptyLine(stderr) ?? "Command failed.";
+      finalize(() => rejectPromise(new Error(`Command failed with exit code ${code ?? "unknown"}${signalLabel}: ${detail}`)));
+    });
+  });
 }
 
 function toErrorMessage(error: unknown) {
