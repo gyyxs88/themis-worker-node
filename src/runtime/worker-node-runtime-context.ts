@@ -1,9 +1,10 @@
-import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { WorkerNodeExecutionError } from "../worker/worker-node-daemon.js";
 import {
   normalizeOptionalText,
   resolveWorkerNodeCredential,
+  resolveWorkerNodeCodexConfigFilePath,
   resolveWorkerNodeProvider,
 } from "./worker-node-runtime-resolution.js";
 
@@ -27,6 +28,7 @@ export interface WorkerNodeMaterializedRuntimeContext {
   homeDirectory: string;
   contextFile: string;
   runtimeAuthFilePath: string | null;
+  runtimeConfigFilePath: string | null;
   providerFile: string | null;
   credential: {
     credentialId: string;
@@ -55,6 +57,7 @@ export function materializeWorkerNodeRuntimeContext(
   mkdirSync(homeDirectory, { recursive: true });
 
   let runtimeAuthFilePath: string | null = null;
+  let runtimeConfigFilePath: string | null = null;
   let providerFile: string | null = null;
   let credential: WorkerNodeMaterializedRuntimeContext["credential"] = null;
   let provider: WorkerNodeMaterializedRuntimeContext["provider"] = null;
@@ -74,6 +77,11 @@ export function materializeWorkerNodeRuntimeContext(
 
     runtimeAuthFilePath = join(runtimeCodexHome, "auth.json");
     copyFileSync(resolved.authFilePath, runtimeAuthFilePath);
+    const sourceConfigFilePath = resolveWorkerNodeCodexConfigFilePath(resolved.codexHome);
+    if (existsSync(sourceConfigFilePath)) {
+      runtimeConfigFilePath = join(runtimeCodexHome, "config.toml");
+      copyFileSync(sourceConfigFilePath, runtimeConfigFilePath);
+    }
     credential = {
       credentialId: effectiveCredentialId,
       codexHome: resolved.codexHome,
@@ -85,6 +93,11 @@ export function materializeWorkerNodeRuntimeContext(
     if (resolvedDefaultCredential.status === "ok") {
       runtimeAuthFilePath = join(runtimeCodexHome, "auth.json");
       copyFileSync(resolvedDefaultCredential.authFilePath, runtimeAuthFilePath);
+      const sourceConfigFilePath = resolveWorkerNodeCodexConfigFilePath(resolvedDefaultCredential.codexHome);
+      if (existsSync(sourceConfigFilePath)) {
+        runtimeConfigFilePath = join(runtimeCodexHome, "config.toml");
+        copyFileSync(sourceConfigFilePath, runtimeConfigFilePath);
+      }
       credential = {
         credentialId: effectiveCredentialId,
         codexHome: resolvedDefaultCredential.codexHome,
@@ -128,6 +141,7 @@ export function materializeWorkerNodeRuntimeContext(
     codexHome: runtimeCodexHome,
     homeDirectory,
     runtimeAuthFilePath,
+    runtimeConfigFilePath,
     providerFile,
     credential,
     provider,
@@ -139,6 +153,7 @@ export function materializeWorkerNodeRuntimeContext(
     homeDirectory,
     contextFile,
     runtimeAuthFilePath,
+    runtimeConfigFilePath,
     providerFile,
     credential,
     provider,

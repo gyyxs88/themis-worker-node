@@ -12,7 +12,7 @@
 - `src/platform/platform-worker-client.ts` 已提供最小平台 worker client
 - `src/worker/worker-node-daemon.ts` 已提供 `register -> heartbeat -> pull -> execute -> report` 最小 daemon 闭环
 - `src/worker/worker-node-local-executor.ts` 已通过真实 `codex exec` 执行任务，并产出 `prompt.txt`、`last-message.txt`、`result.json`、`deliverable.md`、`stdout.log`、`stderr.log`、`report.json`
-- `src/runtime/worker-node-runtime-context.ts` 已提供每个 run 的 `runtime-context.json`、credential auth 复制与 provider 装配
+- `src/runtime/worker-node-runtime-context.ts` 已提供每个 run 的 `runtime-context.json`、credential auth/config 复制与 provider 装配
 - `src/diagnostics/worker-node-diagnostics.ts` 已提供本地 `workspace / credential / provider` 与平台可达性预检
 - `src/cli/worker-node-main.ts` 已提供 `help`、`doctor worker-node`、`worker-node run --once` 与 `--report-root` 最小 CLI
 - `infra/systemd/themis-worker-node.service.example` 与 `docs/worker-node-systemd-service.md` 已随仓提供节点常驻模板和部署说明

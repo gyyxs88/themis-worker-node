@@ -81,6 +81,10 @@ export function resolveWorkerNodeCodexAuthFilePath(codexHome: string) {
   return join(codexHome, "auth.json");
 }
 
+export function resolveWorkerNodeCodexConfigFilePath(codexHome: string) {
+  return join(codexHome, "config.toml");
+}
+
 export function normalizeOptionalText(value: string | null | undefined) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }

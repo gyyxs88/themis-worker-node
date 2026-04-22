@@ -11,6 +11,7 @@ test("materializeWorkerNodeRuntimeContext 会落本地 runtime context / auth / 
   const codexHome = join(root, "codex-home");
   mkdirSync(codexHome, { recursive: true });
   writeFileSync(join(codexHome, "auth.json"), "{\"token\":\"default\"}\n", "utf8");
+  writeFileSync(join(codexHome, "config.toml"), "model = \"gpt-5.4\"\nmodel_reasoning_effort = \"xhigh\"\n", "utf8");
 
   try {
     const result = materializeWorkerNodeRuntimeContext({
@@ -34,6 +35,7 @@ test("materializeWorkerNodeRuntimeContext 会落本地 runtime context / auth / 
     assert.ok(result.codexHome.endsWith("/codex-home"));
     assert.ok(result.homeDirectory.endsWith("/home"));
     assert.ok(result.runtimeAuthFilePath?.endsWith("/codex-home/auth.json"));
+    assert.ok(result.runtimeConfigFilePath?.endsWith("/codex-home/config.toml"));
     assert.ok(result.providerFile?.endsWith("/provider.json"));
 
     const runtimeContext = JSON.parse(readFileSync(result.contextFile, "utf8")) as Record<string, any>;
@@ -42,9 +44,14 @@ test("materializeWorkerNodeRuntimeContext 会落本地 runtime context / auth / 
     assert.equal(runtimeContext.codexHome, result.codexHome);
     assert.equal(runtimeContext.homeDirectory, result.homeDirectory);
     assert.equal(runtimeContext.credential.credentialId, "default");
+    assert.equal(runtimeContext.runtimeConfigFilePath, result.runtimeConfigFilePath);
     assert.equal(runtimeContext.provider.providerId, "openai");
     assert.equal(provider.effectiveModel, "gpt-5.4-mini");
     assert.equal(readFileSync(result.runtimeAuthFilePath ?? "", "utf8"), "{\"token\":\"default\"}\n");
+    assert.equal(
+      readFileSync(result.runtimeConfigFilePath ?? "", "utf8"),
+      "model = \"gpt-5.4\"\nmodel_reasoning_effort = \"xhigh\"\n",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -88,6 +95,7 @@ test("materializeWorkerNodeRuntimeContext 在未显式指定 credentialId 时会
   const codexHome = join(root, "codex-home");
   mkdirSync(codexHome, { recursive: true });
   writeFileSync(join(codexHome, "auth.json"), "{\"token\":\"default\"}\n", "utf8");
+  writeFileSync(join(codexHome, "config.toml"), "model = \"gpt-5.4\"\nmodel_reasoning_effort = \"xhigh\"\n", "utf8");
 
   try {
     const result = materializeWorkerNodeRuntimeContext({
@@ -103,7 +111,12 @@ test("materializeWorkerNodeRuntimeContext 在未显式指定 credentialId 时会
 
     assert.equal(result.credential?.credentialId, "default");
     assert.ok(result.runtimeAuthFilePath?.endsWith("/codex-home/auth.json"));
+    assert.ok(result.runtimeConfigFilePath?.endsWith("/codex-home/config.toml"));
     assert.equal(readFileSync(result.runtimeAuthFilePath ?? "", "utf8"), "{\"token\":\"default\"}\n");
+    assert.equal(
+      readFileSync(result.runtimeConfigFilePath ?? "", "utf8"),
+      "model = \"gpt-5.4\"\nmodel_reasoning_effort = \"xhigh\"\n",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
