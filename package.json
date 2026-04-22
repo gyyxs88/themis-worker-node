@@ -2,6 +2,7 @@
   "name": "themis-worker-node",
   "version": "0.1.0",
   "private": true,
+  "description": "Themis worker node daemon and diagnostics for executing runs on host machines.",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
