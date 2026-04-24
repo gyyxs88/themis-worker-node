@@ -1,5 +1,5 @@
-import { existsSync, lstatSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { accessSync, constants, existsSync, lstatSync } from "node:fs";
+import { delimiter, isAbsolute, resolve } from "node:path";
 import { PlatformWorkerClient } from "../platform/platform-worker-client.js";
 import {
   normalizeOptionalText,
@@ -34,12 +34,20 @@ export interface WorkerNodeDiagnosticsPlatformSummary {
   message: string | null;
 }
 
+export interface WorkerNodeDiagnosticsCodexSummary {
+  status: "ok" | "missing";
+  command: string;
+  source: "explicit" | "local" | "sibling" | "path" | "fallback";
+  message: string | null;
+}
+
 export interface WorkerNodeDiagnosticsSummary {
   generatedAt: string;
   workingDirectory: string;
   workspaces: WorkerNodeDiagnosticsWorkspaceSummary[];
   credentials: WorkerNodeDiagnosticsCredentialSummary[];
   providers: WorkerNodeDiagnosticsProviderSummary[];
+  codex: WorkerNodeDiagnosticsCodexSummary;
   platform: WorkerNodeDiagnosticsPlatformSummary;
   primaryDiagnosis: {
     id: string;
@@ -89,11 +97,13 @@ export class WorkerNodeDiagnosticsService {
     const providers = dedupeStrings(input.providerCapabilities).map((providerId) =>
       summarizeProvider(this.env, providerId)
     );
+    const codex = summarizeCodexCommand(this.workingDirectory, this.env);
     const platform = await this.probePlatform(input);
     const diagnosis = summarizeDiagnosis({
       workspaces,
       credentials,
       providers,
+      codex,
       platform,
     });
 
@@ -103,6 +113,7 @@ export class WorkerNodeDiagnosticsService {
       workspaces,
       credentials,
       providers,
+      codex,
       platform,
       primaryDiagnosis: diagnosis.primaryDiagnosis,
       recommendedNextSteps: diagnosis.recommendedNextSteps,
@@ -228,10 +239,51 @@ function summarizeProvider(env: NodeJS.ProcessEnv, providerId: string): WorkerNo
   };
 }
 
+function summarizeCodexCommand(workingDirectory: string, env: NodeJS.ProcessEnv): WorkerNodeDiagnosticsCodexSummary {
+  const explicitCommand = normalizeOptionalText(env.THEMIS_WORKER_CODEX_BIN);
+  const candidates: Array<{ command: string; source: WorkerNodeDiagnosticsCodexSummary["source"] }> = [
+    ...(explicitCommand ? [{ command: explicitCommand, source: "explicit" as const }] : []),
+    { command: resolve(workingDirectory, "node_modules/.bin/codex"), source: "local" as const },
+    { command: resolve(workingDirectory, "../themis-prod/node_modules/.bin/codex"), source: "sibling" as const },
+    { command: resolve(workingDirectory, "../themis/node_modules/.bin/codex"), source: "sibling" as const },
+    { command: resolve(workingDirectory, "../themis-main/node_modules/.bin/codex"), source: "sibling" as const },
+  ];
+
+  for (const candidate of candidates) {
+    const resolvedCommand = resolveCommandCandidate(candidate.command, env);
+    if (resolvedCommand) {
+      return {
+        status: "ok",
+        command: resolvedCommand,
+        source: candidate.source,
+        message: null,
+      };
+    }
+  }
+
+  const pathCommand = findCommandOnPath("codex", env);
+  if (pathCommand) {
+    return {
+      status: "ok",
+      command: pathCommand,
+      source: "path",
+      message: "通过 PATH 找到 codex；常驻 systemd 环境不一定继承交互 shell 的 PATH，生产节点建议使用本仓 node_modules/.bin/codex 或显式 THEMIS_WORKER_CODEX_BIN。",
+    };
+  }
+
+  return {
+    status: "missing",
+    command: explicitCommand ?? "codex",
+    source: explicitCommand ? "explicit" : "fallback",
+    message: "未找到可执行 codex；真实执行 run 时会失败为 spawn codex ENOENT。",
+  };
+}
+
 function summarizeDiagnosis(input: {
   workspaces: WorkerNodeDiagnosticsWorkspaceSummary[];
   credentials: WorkerNodeDiagnosticsCredentialSummary[];
   providers: WorkerNodeDiagnosticsProviderSummary[];
+  codex: WorkerNodeDiagnosticsCodexSummary;
   platform: WorkerNodeDiagnosticsPlatformSummary;
 }) {
   const recommendedNextSteps = new Set<string>();
@@ -274,6 +326,19 @@ function summarizeDiagnosis(input: {
         severity: "error" as const,
         title: "Worker Node 工作区能力声明无效",
         summary: `当前有 ${invalidWorkspaces.length} 个工作区路径不是可用的绝对目录。`,
+      },
+      recommendedNextSteps: [...recommendedNextSteps],
+    };
+  }
+
+  if (input.codex.status === "missing") {
+    recommendedNextSteps.add("在 Worker Node 仓执行 npm install，确保 node_modules/.bin/codex 存在；或显式配置 THEMIS_WORKER_CODEX_BIN。");
+    return {
+      primaryDiagnosis: {
+        id: "codex_command_missing",
+        severity: "error" as const,
+        title: "Worker Node 找不到 Codex 可执行文件",
+        summary: input.codex.message ?? "未找到可执行 codex。",
       },
       recommendedNextSteps: [...recommendedNextSteps],
     };
@@ -324,6 +389,44 @@ function summarizeDiagnosis(input: {
 
 function dedupeStrings(values: string[]) {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function resolveCommandCandidate(command: string, env: NodeJS.ProcessEnv): string | null {
+  if (isAbsolute(command)) {
+    return isExecutableFile(command) ? command : null;
+  }
+
+  return findCommandOnPath(command, env);
+}
+
+function findCommandOnPath(command: string, env: NodeJS.ProcessEnv): string | null {
+  const pathValue = normalizeOptionalText(env.PATH);
+  if (!pathValue || command.includes("/")) {
+    return null;
+  }
+
+  for (const entry of pathValue.split(delimiter)) {
+    const directory = normalizeOptionalText(entry);
+    if (!directory) {
+      continue;
+    }
+
+    const candidate = resolve(directory, command);
+    if (isExecutableFile(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function isExecutableFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function toErrorMessage(error: unknown) {

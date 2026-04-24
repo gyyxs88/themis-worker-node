@@ -15,6 +15,7 @@
     "themis:worker-node": "tsx src/cli/worker-node-main.ts"
   },
   "dependencies": {
+    "@openai/codex": "^0.124.0",
     "themis-contracts": "file:../themis-contracts"
   },
   "devDependencies": {

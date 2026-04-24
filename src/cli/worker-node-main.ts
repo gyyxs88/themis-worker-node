@@ -228,6 +228,10 @@ async function handleDoctorWorkerNode(
       }
     }
   }
+  stdout.write(`codex.status：${summary.codex.status}\n`);
+  stdout.write(`codex.command：${summary.codex.command}\n`);
+  stdout.write(`codex.source：${summary.codex.source}\n`);
+  stdout.write(`codex.message：${summary.codex.message ?? "<none>"}\n`);
   stdout.write(`platform.status：${summary.platform.status}\n`);
   stdout.write(`platform.baseUrl：${summary.platform.baseUrl ?? "<none>"}\n`);
   stdout.write(`platform.nodeCount：${summary.platform.nodeCount ?? "<none>"}\n`);
