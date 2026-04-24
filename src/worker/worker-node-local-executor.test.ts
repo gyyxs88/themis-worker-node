@@ -71,6 +71,10 @@ function createAssignedRun(workspacePath: string): ManagedAgentPlatformWorkerAss
       credentialId: "default",
       provider: "openai",
       model: "gpt-5.4-mini",
+      reasoning: "high",
+      sandboxMode: "read-only",
+      approvalPolicy: "never",
+      networkAccessEnabled: false,
     },
   };
 }
@@ -185,6 +189,11 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
     assert.ok(codexArgs.includes("--disable"));
     assert.ok(codexArgs.includes("--output-schema"));
     assert.ok(codexArgs.includes("--model"));
+    assert.ok(codexArgs.includes("--sandbox"));
+    assert.equal(codexArgs[codexArgs.indexOf("--sandbox") + 1], "read-only");
+    assert.equal(codexArgs.includes("--dangerously-bypass-approvals-and-sandbox"), false);
+    assert.ok(codexArgs.includes("approval_policy=\"never\""));
+    assert.ok(codexArgs.includes("model_reasoning_effort=\"high\""));
     const resultOutput = result.output as Record<string, unknown> | undefined;
     assert.equal(resultOutput?.reportFile, reportFile);
     assert.ok(String(resultOutput?.deliverableFile ?? "").endsWith("/deliverable.md"));
@@ -193,6 +202,8 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
     const artifactContents = structuredOutput?.artifactContents as Record<string, any> | undefined;
     assert.equal(artifactContents?.prompt?.label, "执行 prompt");
     assert.match(String(artifactContents?.prompt?.content ?? ""), /验证 worker 本机执行器会生成 report/);
+    assert.match(String(artifactContents?.prompt?.content ?? ""), /sandboxMode: read-only/);
+    assert.match(String(artifactContents?.prompt?.content ?? ""), /只能读取和分析/);
     assert.equal(artifactContents?.prompt?.truncated, false);
     assert.equal(artifactContents?.result?.mediaType, "application/json");
     assert.match(String(artifactContents?.result?.content ?? ""), /"deliverable": "这里是完整交付正文。"/);
@@ -204,6 +215,12 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
     assert.match(String(artifactContents?.stdout?.content ?? ""), /execution complete/);
     assert.equal(artifactContents?.stderr?.mediaType, "text/plain");
     assert.match(String(artifactContents?.stderr?.content ?? ""), /warmup warning/);
+    assert.equal(report.executionContract.sandboxMode, "read-only");
+    assert.equal(report.executionContract.approvalPolicy, "never");
+    assert.equal(report.executionContract.networkAccessEnabled, false);
+    assert.equal(report.codex.sandboxMode, "read-only");
+    assert.equal(report.codex.approvalPolicy, "never");
+    assert.equal(report.codex.bypassedApprovalsAndSandbox, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

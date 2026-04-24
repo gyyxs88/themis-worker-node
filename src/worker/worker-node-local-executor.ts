@@ -69,6 +69,11 @@ interface WorkerNodeCodexExecutionResult extends WorkerNodeCodexStructuredResult
   stdout: string;
   stderr: string;
   resolvedArtifactPaths: string[];
+  sandboxMode: WorkerNodeCodexSandboxMode;
+  approvalPolicy: WorkerNodeCodexApprovalPolicy;
+  bypassedApprovalsAndSandbox: boolean;
+  model: string | null;
+  reasoning: string | null;
   completedAt: string;
 }
 
@@ -80,6 +85,31 @@ interface WorkerNodeEmbeddedArtifactSnapshot {
   truncated: boolean;
   byteLength: number;
 }
+
+type WorkerNodeCodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+type WorkerNodeCodexApprovalPolicy = "never" | "on-request" | "on-failure" | "untrusted";
+
+interface WorkerNodeCodexExecutionOptions {
+  sandboxMode: WorkerNodeCodexSandboxMode;
+  approvalPolicy: WorkerNodeCodexApprovalPolicy;
+  bypassedApprovalsAndSandbox: boolean;
+  model: string | null;
+  reasoning: string | null;
+}
+
+const DEFAULT_CODEX_SANDBOX_MODE: WorkerNodeCodexSandboxMode = "workspace-write";
+const DEFAULT_CODEX_APPROVAL_POLICY: WorkerNodeCodexApprovalPolicy = "never";
+const CODEX_SANDBOX_MODES = new Set<WorkerNodeCodexSandboxMode>([
+  "read-only",
+  "workspace-write",
+  "danger-full-access",
+]);
+const CODEX_APPROVAL_POLICIES = new Set<WorkerNodeCodexApprovalPolicy>([
+  "never",
+  "on-request",
+  "on-failure",
+  "untrusted",
+]);
 
 export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOptions): WorkerNodeExecutor {
   const workingDirectory = resolve(options.workingDirectory);
@@ -168,6 +198,11 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
           deliverableFile: codexExecution.deliverableFile,
           stdoutLogFile: codexExecution.stdoutLogFile,
           stderrLogFile: codexExecution.stderrLogFile,
+          sandboxMode: codexExecution.sandboxMode,
+          approvalPolicy: codexExecution.approvalPolicy,
+          bypassedApprovalsAndSandbox: codexExecution.bypassedApprovalsAndSandbox,
+          model: codexExecution.model,
+          reasoning: codexExecution.reasoning,
           workspacePath,
           runtimeContext,
           workspaceEntryCount: workspace.entryCount,
@@ -175,7 +210,6 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
           git,
           credentialId: assignedRun.executionContract.credentialId ?? null,
           provider: assignedRun.executionContract.provider ?? null,
-          model: assignedRun.executionContract.model ?? null,
           artifactContents,
         },
         touchedFiles: [
@@ -315,7 +349,8 @@ async function runCodexExecution(input: {
   now: () => string;
   commandRunner: WorkerNodeLocalExecutorCommandRunner;
 }): Promise<WorkerNodeCodexExecutionResult> {
-  const prompt = buildCodexPrompt(input.assignedRun, input.workspacePath);
+  const executionOptions = resolveCodexExecutionOptions(input.assignedRun.executionContract);
+  const prompt = buildCodexPrompt(input.assignedRun, input.workspacePath, executionOptions);
   const promptFile = join(input.reportDirectory, "prompt.txt");
   const outputFile = join(input.reportDirectory, "last-message.txt");
   const resultFile = join(input.reportDirectory, "result.json");
@@ -335,6 +370,7 @@ async function runCodexExecution(input: {
     outputSchemaFile,
     prompt,
     providerConfig,
+    executionOptions,
   });
   const commandResult = await input.commandRunner(codexCommand, args, {
     cwd: input.workspacePath,
@@ -375,6 +411,11 @@ async function runCodexExecution(input: {
     stdout: commandResult.stdout,
     stderr: commandResult.stderr,
     resolvedArtifactPaths,
+    sandboxMode: executionOptions.sandboxMode,
+    approvalPolicy: executionOptions.approvalPolicy,
+    bypassedApprovalsAndSandbox: executionOptions.bypassedApprovalsAndSandbox,
+    model: executionOptions.model,
+    reasoning: executionOptions.reasoning,
     completedAt: input.now(),
   };
 }
@@ -419,6 +460,10 @@ function writeExecutionReport(input: {
       credentialId: input.assignedRun.executionContract.credentialId ?? null,
       provider: input.assignedRun.executionContract.provider ?? null,
       model: input.assignedRun.executionContract.model ?? null,
+      reasoning: input.assignedRun.executionContract.reasoning ?? null,
+      sandboxMode: input.codexExecution.sandboxMode,
+      approvalPolicy: input.codexExecution.approvalPolicy,
+      networkAccessEnabled: input.assignedRun.executionContract.networkAccessEnabled ?? null,
     },
     result: {
       schemaVersion: COMPLETION_SCHEMA_VERSION,
@@ -447,6 +492,11 @@ function writeExecutionReport(input: {
     },
     codex: {
       disabledFeatures: [...WORKER_DISABLED_CODEX_FEATURES],
+      sandboxMode: input.codexExecution.sandboxMode,
+      approvalPolicy: input.codexExecution.approvalPolicy,
+      bypassedApprovalsAndSandbox: input.codexExecution.bypassedApprovalsAndSandbox,
+      model: input.codexExecution.model,
+      reasoning: input.codexExecution.reasoning,
       promptFile: input.codexExecution.promptFile,
       outputFile: input.codexExecution.outputFile,
       resultFile: input.codexExecution.resultFile,
@@ -637,7 +687,9 @@ function toErrorMessage(error: unknown) {
 function buildCodexPrompt(
   assignedRun: Parameters<WorkerNodeExecutor["execute"]>[0]["assignedRun"],
   workspacePath: string,
+  executionOptions: WorkerNodeCodexExecutionOptions,
 ) {
+  const readOnly = executionOptions.sandboxMode === "read-only";
   return [
     "你正在 Themis Worker Node 上执行一条真实工单。",
     "",
@@ -647,13 +699,19 @@ function buildCodexPrompt(
     `- targetAgent: ${assignedRun.targetAgent.displayName}`,
     `- priority: ${assignedRun.workItem.priority}`,
     `- workspacePath: ${workspacePath}`,
+    `- sandboxMode: ${executionOptions.sandboxMode}`,
+    `- approvalPolicy: ${executionOptions.approvalPolicy}`,
     "",
     "工单目标：",
     assignedRun.workItem.goal,
     "",
     "执行要求：",
-    "1. 直接在当前工作区内完成任务，必要时读取、修改或新增文件。",
-    "2. 如果你产出了值得交付的文件，请把相对当前工作区的路径写进 artifactPaths。",
+    readOnly
+      ? "1. 直接在当前工作区内完成任务；当前 sandbox 是 read-only，只能读取和分析，不要修改、新增或删除文件。"
+      : "1. 直接在当前工作区内完成任务，必要时读取、修改或新增文件。",
+    readOnly
+      ? "2. 如果你发现需要写入文件才能完成，请在 deliverable 里说明需要后续补写，不要尝试绕过只读限制。"
+      : "2. 如果你产出了值得交付的文件，请把相对当前工作区的路径写进 artifactPaths。",
     "3. 不要向人追问额外输入；在现有上下文下尽最大努力完成，并明确写出不确定性。",
     "4. 最终输出必须符合 JSON schema：summary 用一句话概括结果，deliverable 写完整可读的交付正文，artifactPaths/followUp 用字符串数组。",
   ].join("\n");
@@ -734,15 +792,17 @@ function buildCodexExecArgs(input: {
   outputSchemaFile: string;
   prompt: string;
   providerConfig: WorkerNodeProviderConfig | null;
+  executionOptions: WorkerNodeCodexExecutionOptions;
 }) {
+  const model = input.executionOptions.model ?? input.providerConfig?.effectiveModel;
   return [
     "exec",
     ...WORKER_DISABLED_CODEX_FEATURES.flatMap((feature) => ["--disable", feature]),
     "--ephemeral",
     "--skip-git-repo-check",
-    "--dangerously-bypass-approvals-and-sandbox",
+    ...(input.executionOptions.bypassedApprovalsAndSandbox ? ["--dangerously-bypass-approvals-and-sandbox"] : []),
     "--sandbox",
-    "danger-full-access",
+    input.executionOptions.sandboxMode,
     "--color",
     "never",
     "-C",
@@ -751,10 +811,18 @@ function buildCodexExecArgs(input: {
     input.outputFile,
     "--output-schema",
     input.outputSchemaFile,
-    ...(input.providerConfig?.effectiveModel ? ["--model", input.providerConfig.effectiveModel] : []),
+    ...(model ? ["--model", model] : []),
+    ...buildCodexRuntimeConfigArgs(input.executionOptions),
     ...buildCodexProviderConfigArgs(input.providerConfig),
     input.prompt,
   ];
+}
+
+function buildCodexRuntimeConfigArgs(options: WorkerNodeCodexExecutionOptions) {
+  return buildConfigArgs({
+    approval_policy: options.approvalPolicy,
+    ...(options.reasoning ? { model_reasoning_effort: options.reasoning } : {}),
+  });
 }
 
 function buildCodexProviderConfigArgs(providerConfig: WorkerNodeProviderConfig | null) {
@@ -774,6 +842,34 @@ function buildCodexProviderConfigArgs(providerConfig: WorkerNodeProviderConfig |
       },
     },
   });
+}
+
+function resolveCodexExecutionOptions(
+  contract: Parameters<WorkerNodeExecutor["execute"]>[0]["assignedRun"]["executionContract"],
+): WorkerNodeCodexExecutionOptions {
+  const sandboxMode = normalizeCodexSandboxMode(contract.sandboxMode) ?? DEFAULT_CODEX_SANDBOX_MODE;
+  const approvalPolicy = normalizeCodexApprovalPolicy(contract.approvalPolicy) ?? DEFAULT_CODEX_APPROVAL_POLICY;
+  return {
+    sandboxMode,
+    approvalPolicy,
+    bypassedApprovalsAndSandbox: sandboxMode === "danger-full-access",
+    model: normalizeOptionalText(contract.model),
+    reasoning: normalizeOptionalText(contract.reasoning),
+  };
+}
+
+function normalizeCodexSandboxMode(value: unknown): WorkerNodeCodexSandboxMode | null {
+  const normalized = normalizeOptionalText(value);
+  return normalized && CODEX_SANDBOX_MODES.has(normalized as WorkerNodeCodexSandboxMode)
+    ? normalized as WorkerNodeCodexSandboxMode
+    : null;
+}
+
+function normalizeCodexApprovalPolicy(value: unknown): WorkerNodeCodexApprovalPolicy | null {
+  const normalized = normalizeOptionalText(value);
+  return normalized && CODEX_APPROVAL_POLICIES.has(normalized as WorkerNodeCodexApprovalPolicy)
+    ? normalized as WorkerNodeCodexApprovalPolicy
+    : null;
 }
 
 function buildConfigArgs(configOverrides: Record<string, unknown>) {
