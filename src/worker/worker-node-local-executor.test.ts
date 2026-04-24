@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -243,6 +243,53 @@ test("createLocalWorkerExecutor 会在工作区无效时抛出边界错误", asy
         && error.failureCode === "WORKER_NODE_WORKSPACE_INVALID"
         && /missing/i.test(error.message),
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("createLocalWorkerExecutor 会保留 Codex 非零退出 stderr 并归类安全拦截", async () => {
+  const root = join(tmpdir(), `themis-worker-node-local-executor-codex-fail-${Date.now()}`);
+  const workspacePath = join(root, "workspace");
+  const codexHome = join(root, "codex-home");
+  const codexBin = join(root, "codex");
+  mkdirSync(workspacePath, { recursive: true });
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(join(codexHome, "auth.json"), "{\"token\":\"default\"}\n", "utf8");
+  writeFileSync(codexBin, [
+    "#!/bin/sh",
+    "echo 'Reading additional input from stdin...' >&2",
+    "echo 'OpenAI Codex v0.124.0 (research preview)' >&2",
+    "echo 'ERROR: This request has been flagged for potentially high-risk cyber activity. Learn more here: https://platform.openai.com/docs/guides/safety-checks/cybersecurity' >&2",
+    "exit 1",
+    "",
+  ].join("\n"), "utf8");
+  chmodSync(codexBin, 0o755);
+
+  const executor = createLocalWorkerExecutor({
+    workingDirectory: root,
+    env: {
+      CODEX_HOME: codexHome,
+      THEMIS_WORKER_CODEX_BIN: codexBin,
+      THEMIS_PROVIDER_OPENAI_BASE_URL: "https://api.openai.example.com",
+      THEMIS_PROVIDER_OPENAI_API_KEY: "provider-secret",
+    },
+  });
+
+  try {
+    await assert.rejects(
+      executor.execute({
+        assignedRun: createAssignedRun(workspacePath),
+      }),
+      (error) =>
+        error instanceof WorkerNodeExecutionError
+        && error.failureCode === "WORKER_NODE_CODEX_SAFETY_BLOCKED"
+        && /high-risk cyber activity/.test(error.message)
+        && !/Reading additional input/.test(error.message),
+    );
+
+    const stderrLog = join(root, "infra/local/worker-runs/run-alpha/stderr.log");
+    assert.match(readFileSync(stderrLog, "utf8"), /high-risk cyber activity/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

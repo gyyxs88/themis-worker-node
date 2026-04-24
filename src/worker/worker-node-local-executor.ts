@@ -86,6 +86,28 @@ interface WorkerNodeEmbeddedArtifactSnapshot {
   byteLength: number;
 }
 
+class WorkerNodeCommandError extends Error {
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly stdout: string;
+  readonly stderr: string;
+
+  constructor(input: {
+    message: string;
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+    stdout: string;
+    stderr: string;
+  }) {
+    super(input.message);
+    this.name = "WorkerNodeCommandError";
+    this.exitCode = input.exitCode;
+    this.signal = input.signal;
+    this.stdout = input.stdout;
+    this.stderr = input.stderr;
+  }
+}
+
 type WorkerNodeCodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 type WorkerNodeCodexApprovalPolicy = "never" | "on-request" | "on-failure" | "untrusted";
 
@@ -372,12 +394,21 @@ async function runCodexExecution(input: {
     providerConfig,
     executionOptions,
   });
-  const commandResult = await input.commandRunner(codexCommand, args, {
-    cwd: input.workspacePath,
-    timeoutMs: resolveCodexCommandTimeoutMs(input.env),
-    env: codexEnv,
-    maxBufferBytes: DEFAULT_COMMAND_MAX_BUFFER_BYTES,
-  });
+  const commandResult = await runCodexCommandWithFailureArtifacts(
+    input.commandRunner,
+    codexCommand,
+    args,
+    {
+      cwd: input.workspacePath,
+      timeoutMs: resolveCodexCommandTimeoutMs(input.env),
+      env: codexEnv,
+      maxBufferBytes: DEFAULT_COMMAND_MAX_BUFFER_BYTES,
+    },
+    {
+      stdoutLogFile,
+      stderrLogFile,
+    },
+  );
 
   writeFileSync(stdoutLogFile, commandResult.stdout, "utf8");
   writeFileSync(stderrLogFile, commandResult.stderr, "utf8");
@@ -418,6 +449,32 @@ async function runCodexExecution(input: {
     reasoning: executionOptions.reasoning,
     completedAt: input.now(),
   };
+}
+
+async function runCodexCommandWithFailureArtifacts(
+  commandRunner: WorkerNodeLocalExecutorCommandRunner,
+  command: string,
+  args: string[],
+  input: WorkerNodeLocalExecutorCommandInput,
+  artifacts: {
+    stdoutLogFile: string;
+    stderrLogFile: string;
+  },
+): Promise<WorkerNodeLocalExecutorCommandResult> {
+  try {
+    return await commandRunner(command, args, input);
+  } catch (error) {
+    if (error instanceof WorkerNodeCommandError) {
+      writeFileSync(artifacts.stdoutLogFile, error.stdout, "utf8");
+      writeFileSync(artifacts.stderrLogFile, error.stderr, "utf8");
+      throw new WorkerNodeExecutionError(
+        buildCodexCommandFailureMessage(error, artifacts.stderrLogFile),
+        classifyCodexCommandFailure(error),
+      );
+    }
+
+    throw error;
+  }
 }
 
 function writeExecutionReport(input: {
@@ -674,10 +731,34 @@ async function runLocalCommand(
       }
 
       const signalLabel = signal ? ` (signal ${signal})` : "";
-      const detail = firstNonEmptyLine(stderr) ?? "Command failed.";
-      finalize(() => rejectPromise(new Error(`Command failed with exit code ${code ?? "unknown"}${signalLabel}: ${detail}`)));
+      const detail = selectMeaningfulCommandFailureLine(stderr) ?? "Command failed.";
+      finalize(() => rejectPromise(new WorkerNodeCommandError({
+        message: `Command failed with exit code ${code ?? "unknown"}${signalLabel}: ${detail}`,
+        exitCode: code,
+        signal,
+        stdout,
+        stderr,
+      })));
     });
   });
+}
+
+function buildCodexCommandFailureMessage(error: WorkerNodeCommandError, stderrLogFile: string) {
+  const signalLabel = error.signal ? ` (signal ${error.signal})` : "";
+  const detail = selectMeaningfulCommandFailureLine(error.stderr) ?? "Command failed.";
+  return `Codex command failed with exit code ${error.exitCode ?? "unknown"}${signalLabel}: ${detail} (stderr: ${stderrLogFile})`;
+}
+
+function classifyCodexCommandFailure(error: WorkerNodeCommandError) {
+  const stderr = error.stderr.toLowerCase();
+  if (
+    stderr.includes("flagged for potentially high-risk cyber activity")
+    || stderr.includes("safety-checks/cybersecurity")
+  ) {
+    return "WORKER_NODE_CODEX_SAFETY_BLOCKED";
+  }
+
+  return "WORKER_NODE_CODEX_COMMAND_FAILED";
 }
 
 function toErrorMessage(error: unknown) {
@@ -992,6 +1073,31 @@ function firstNonEmptyLine(value: string) {
     .map((line) => normalizeOptionalText(line))
     .find((line): line is string => Boolean(line))
     ?? null;
+}
+
+function selectMeaningfulCommandFailureLine(value: string) {
+  const meaningful = value
+    .split(/\r?\n/)
+    .map((line) => normalizeOptionalText(line))
+    .filter((line): line is string => Boolean(line))
+    .find((line) => !isCommandFailureNoiseLine(line));
+  return meaningful ?? firstNonEmptyLine(value);
+}
+
+function isCommandFailureNoiseLine(line: string) {
+  if (line === "Reading additional input from stdin...") {
+    return true;
+  }
+
+  if (line.startsWith("OpenAI Codex ")) {
+    return true;
+  }
+
+  if (line === "--------") {
+    return true;
+  }
+
+  return /^(workdir|model|provider|approval|sandbox|reasoning effort|reasoning summaries|session id):/i.test(line);
 }
 
 function normalizeOptionalText(value: unknown) {
