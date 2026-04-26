@@ -7,7 +7,10 @@ import type { ManagedAgentPlatformWorkerAssignedRunResult } from "themis-contrac
 import { WorkerNodeExecutionError } from "./worker-node-daemon.js";
 import { createLocalWorkerExecutor } from "./worker-node-local-executor.js";
 
-function createAssignedRun(workspacePath: string): ManagedAgentPlatformWorkerAssignedRunResult {
+function createAssignedRun(
+  workspacePath: string,
+  executionContract?: Partial<ManagedAgentPlatformWorkerAssignedRunResult["executionContract"]>,
+): ManagedAgentPlatformWorkerAssignedRunResult {
   return {
     organization: {
       organizationId: "org-platform",
@@ -75,6 +78,7 @@ function createAssignedRun(workspacePath: string): ManagedAgentPlatformWorkerAss
       sandboxMode: "read-only",
       approvalPolicy: "never",
       networkAccessEnabled: false,
+      ...executionContract,
     },
   };
 }
@@ -194,6 +198,7 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
     assert.equal(codexArgs.includes("--dangerously-bypass-approvals-and-sandbox"), false);
     assert.ok(codexArgs.includes("approval_policy=\"never\""));
     assert.ok(codexArgs.includes("model_reasoning_effort=\"high\""));
+    assert.ok(codexArgs.includes("sandbox_workspace_write.network_access=false"));
     const resultOutput = result.output as Record<string, unknown> | undefined;
     assert.equal(resultOutput?.reportFile, reportFile);
     assert.ok(String(resultOutput?.deliverableFile ?? "").endsWith("/deliverable.md"));
@@ -218,9 +223,95 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
     assert.equal(report.executionContract.sandboxMode, "read-only");
     assert.equal(report.executionContract.approvalPolicy, "never");
     assert.equal(report.executionContract.networkAccessEnabled, false);
+    assert.equal(report.codex.requestedSandboxMode, "read-only");
     assert.equal(report.codex.sandboxMode, "read-only");
+    assert.equal(report.codex.sandboxModeAdjustedForNetworkAccess, false);
     assert.equal(report.codex.approvalPolicy, "never");
+    assert.equal(report.codex.networkAccessEnabled, false);
     assert.equal(report.codex.bypassedApprovalsAndSandbox, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("createLocalWorkerExecutor 会把只读联网工单映射为 Codex 可联网 sandbox 并保留只读约束", async () => {
+  const root = join(tmpdir(), `themis-worker-node-local-executor-network-${Date.now()}`);
+  const workspacePath = join(root, "workspace");
+  const codexHome = join(root, "codex-home");
+  const codexBin = join(root, "codex");
+  mkdirSync(workspacePath, { recursive: true });
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(join(workspacePath, "README.md"), "# worker\n", "utf8");
+  writeFileSync(join(codexHome, "auth.json"), "{\"token\":\"default\"}\n", "utf8");
+  writeFileSync(codexBin, "#!/bin/sh\n", "utf8");
+
+  const commands: Array<{ command: string; args: string[]; cwd: string }> = [];
+  const executor = createLocalWorkerExecutor({
+    workingDirectory: root,
+    env: {
+      CODEX_HOME: codexHome,
+      THEMIS_WORKER_CODEX_BIN: codexBin,
+      THEMIS_PROVIDER_OPENAI_BASE_URL: "https://api.openai.example.com",
+      THEMIS_PROVIDER_OPENAI_API_KEY: "provider-secret",
+    },
+    now: () => "2026-04-14T12:30:00.000Z",
+    commandRunner: async (command, args, input) => {
+      commands.push({ command, args, cwd: input.cwd });
+
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { stdout: "false\n", stderr: "" };
+      }
+
+      if (command === codexBin && args[0] === "exec") {
+        const outputFile = args[args.indexOf("-o") + 1];
+        assert.ok(outputFile);
+        writeFileSync(String(outputFile), JSON.stringify({
+          summary: "网络冒烟完成。",
+          deliverable: "example.com 可以解析。",
+          artifactPaths: [],
+          followUp: [],
+        }, null, 2), "utf8");
+        return { stdout: "", stderr: "sandbox: workspace-write (network access enabled)\n" };
+      }
+
+      throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
+    },
+  });
+
+  try {
+    const result = await executor.execute({
+      assignedRun: createAssignedRun(workspacePath, {
+        sandboxMode: "read-only",
+        networkAccessEnabled: true,
+      }),
+    });
+
+    assert.equal(result.kind, "completed");
+    const codexCommand = commands.find((entry) => entry.command === codexBin);
+    assert.ok(codexCommand);
+    const codexArgs = codexCommand.args;
+    assert.equal(codexArgs[codexArgs.indexOf("--sandbox") + 1], "workspace-write");
+    assert.equal(codexArgs.includes("--dangerously-bypass-approvals-and-sandbox"), false);
+    assert.ok(codexArgs.includes("sandbox_workspace_write.network_access=true"));
+
+    const reportFile = result.touchedFiles?.[0];
+    assert.ok(reportFile);
+    const report = JSON.parse(readFileSync(reportFile, "utf8")) as Record<string, any>;
+    assert.equal(report.executionContract.sandboxMode, "read-only");
+    assert.equal(report.executionContract.networkAccessEnabled, true);
+    assert.equal(report.codex.requestedSandboxMode, "read-only");
+    assert.equal(report.codex.sandboxMode, "workspace-write");
+    assert.equal(report.codex.sandboxModeAdjustedForNetworkAccess, true);
+    assert.equal(report.codex.networkAccessEnabled, true);
+
+    const structuredOutput = result.structuredOutput as Record<string, any>;
+    assert.equal(structuredOutput.requestedSandboxMode, "read-only");
+    assert.equal(structuredOutput.sandboxMode, "workspace-write");
+    assert.equal(structuredOutput.sandboxModeAdjustedForNetworkAccess, true);
+    assert.equal(structuredOutput.networkAccessEnabled, true);
+    assert.match(String(structuredOutput.artifactContents.prompt.content), /sandboxMode: read-only/);
+    assert.match(String(structuredOutput.artifactContents.prompt.content), /effectiveCodexSandboxMode: workspace-write/);
+    assert.match(String(structuredOutput.artifactContents.prompt.content), /不要修改、新增或删除文件/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

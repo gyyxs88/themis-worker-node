@@ -69,8 +69,11 @@ interface WorkerNodeCodexExecutionResult extends WorkerNodeCodexStructuredResult
   stdout: string;
   stderr: string;
   resolvedArtifactPaths: string[];
+  requestedSandboxMode: WorkerNodeCodexSandboxMode;
   sandboxMode: WorkerNodeCodexSandboxMode;
+  sandboxModeAdjustedForNetworkAccess: boolean;
   approvalPolicy: WorkerNodeCodexApprovalPolicy;
+  networkAccessEnabled: boolean | null;
   bypassedApprovalsAndSandbox: boolean;
   model: string | null;
   reasoning: string | null;
@@ -112,8 +115,11 @@ type WorkerNodeCodexSandboxMode = "read-only" | "workspace-write" | "danger-full
 type WorkerNodeCodexApprovalPolicy = "never" | "on-request" | "on-failure" | "untrusted";
 
 interface WorkerNodeCodexExecutionOptions {
+  requestedSandboxMode: WorkerNodeCodexSandboxMode;
   sandboxMode: WorkerNodeCodexSandboxMode;
+  sandboxModeAdjustedForNetworkAccess: boolean;
   approvalPolicy: WorkerNodeCodexApprovalPolicy;
+  networkAccessEnabled: boolean | null;
   bypassedApprovalsAndSandbox: boolean;
   model: string | null;
   reasoning: string | null;
@@ -220,8 +226,11 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
           deliverableFile: codexExecution.deliverableFile,
           stdoutLogFile: codexExecution.stdoutLogFile,
           stderrLogFile: codexExecution.stderrLogFile,
+          requestedSandboxMode: codexExecution.requestedSandboxMode,
           sandboxMode: codexExecution.sandboxMode,
+          sandboxModeAdjustedForNetworkAccess: codexExecution.sandboxModeAdjustedForNetworkAccess,
           approvalPolicy: codexExecution.approvalPolicy,
+          networkAccessEnabled: codexExecution.networkAccessEnabled,
           bypassedApprovalsAndSandbox: codexExecution.bypassedApprovalsAndSandbox,
           model: codexExecution.model,
           reasoning: codexExecution.reasoning,
@@ -442,8 +451,11 @@ async function runCodexExecution(input: {
     stdout: commandResult.stdout,
     stderr: commandResult.stderr,
     resolvedArtifactPaths,
+    requestedSandboxMode: executionOptions.requestedSandboxMode,
     sandboxMode: executionOptions.sandboxMode,
+    sandboxModeAdjustedForNetworkAccess: executionOptions.sandboxModeAdjustedForNetworkAccess,
     approvalPolicy: executionOptions.approvalPolicy,
+    networkAccessEnabled: executionOptions.networkAccessEnabled,
     bypassedApprovalsAndSandbox: executionOptions.bypassedApprovalsAndSandbox,
     model: executionOptions.model,
     reasoning: executionOptions.reasoning,
@@ -518,9 +530,9 @@ function writeExecutionReport(input: {
       provider: input.assignedRun.executionContract.provider ?? null,
       model: input.assignedRun.executionContract.model ?? null,
       reasoning: input.assignedRun.executionContract.reasoning ?? null,
-      sandboxMode: input.codexExecution.sandboxMode,
+      sandboxMode: input.codexExecution.requestedSandboxMode,
       approvalPolicy: input.codexExecution.approvalPolicy,
-      networkAccessEnabled: input.assignedRun.executionContract.networkAccessEnabled ?? null,
+      networkAccessEnabled: input.codexExecution.networkAccessEnabled,
     },
     result: {
       schemaVersion: COMPLETION_SCHEMA_VERSION,
@@ -549,8 +561,11 @@ function writeExecutionReport(input: {
     },
     codex: {
       disabledFeatures: [...WORKER_DISABLED_CODEX_FEATURES],
+      requestedSandboxMode: input.codexExecution.requestedSandboxMode,
       sandboxMode: input.codexExecution.sandboxMode,
+      sandboxModeAdjustedForNetworkAccess: input.codexExecution.sandboxModeAdjustedForNetworkAccess,
       approvalPolicy: input.codexExecution.approvalPolicy,
+      networkAccessEnabled: input.codexExecution.networkAccessEnabled,
       bypassedApprovalsAndSandbox: input.codexExecution.bypassedApprovalsAndSandbox,
       model: input.codexExecution.model,
       reasoning: input.codexExecution.reasoning,
@@ -770,7 +785,17 @@ function buildCodexPrompt(
   workspacePath: string,
   executionOptions: WorkerNodeCodexExecutionOptions,
 ) {
-  const readOnly = executionOptions.sandboxMode === "read-only";
+  const readOnly = executionOptions.requestedSandboxMode === "read-only";
+  const sandboxLines = [
+    `- sandboxMode: ${executionOptions.requestedSandboxMode}`,
+    ...(executionOptions.sandboxMode !== executionOptions.requestedSandboxMode
+      ? [
+          `- effectiveCodexSandboxMode: ${executionOptions.sandboxMode}`,
+          "- sandboxNote: Codex CLI 只有 workspace-write sandbox 支持网络访问；本次仍按 requested sandbox 的只读约束执行。",
+        ]
+      : []),
+    `- networkAccessEnabled: ${executionOptions.networkAccessEnabled ?? "default"}`,
+  ];
   return [
     "你正在 Themis Worker Node 上执行一条真实工单。",
     "",
@@ -780,7 +805,7 @@ function buildCodexPrompt(
     `- targetAgent: ${assignedRun.targetAgent.displayName}`,
     `- priority: ${assignedRun.workItem.priority}`,
     `- workspacePath: ${workspacePath}`,
-    `- sandboxMode: ${executionOptions.sandboxMode}`,
+    ...sandboxLines,
     `- approvalPolicy: ${executionOptions.approvalPolicy}`,
     "",
     "工单目标：",
@@ -788,7 +813,7 @@ function buildCodexPrompt(
     "",
     "执行要求：",
     readOnly
-      ? "1. 直接在当前工作区内完成任务；当前 sandbox 是 read-only，只能读取和分析，不要修改、新增或删除文件。"
+      ? "1. 直接在当前工作区内完成任务；本工单请求的是 read-only，只能读取和分析，不要修改、新增或删除文件。"
       : "1. 直接在当前工作区内完成任务，必要时读取、修改或新增文件。",
     readOnly
       ? "2. 如果你发现需要写入文件才能完成，请在 deliverable 里说明需要后续补写，不要尝试绕过只读限制。"
@@ -903,6 +928,9 @@ function buildCodexRuntimeConfigArgs(options: WorkerNodeCodexExecutionOptions) {
   return buildConfigArgs({
     approval_policy: options.approvalPolicy,
     ...(options.reasoning ? { model_reasoning_effort: options.reasoning } : {}),
+    ...(typeof options.networkAccessEnabled === "boolean"
+      ? { "sandbox_workspace_write.network_access": options.networkAccessEnabled }
+      : {}),
   });
 }
 
@@ -928,15 +956,34 @@ function buildCodexProviderConfigArgs(providerConfig: WorkerNodeProviderConfig |
 function resolveCodexExecutionOptions(
   contract: Parameters<WorkerNodeExecutor["execute"]>[0]["assignedRun"]["executionContract"],
 ): WorkerNodeCodexExecutionOptions {
-  const sandboxMode = normalizeCodexSandboxMode(contract.sandboxMode) ?? DEFAULT_CODEX_SANDBOX_MODE;
+  const requestedSandboxMode = normalizeCodexSandboxMode(contract.sandboxMode) ?? DEFAULT_CODEX_SANDBOX_MODE;
+  const networkAccessEnabled = normalizeOptionalBoolean(contract.networkAccessEnabled);
+  const sandboxMode = resolveEffectiveCodexSandboxMode({
+    requestedSandboxMode,
+    networkAccessEnabled,
+  });
   const approvalPolicy = normalizeCodexApprovalPolicy(contract.approvalPolicy) ?? DEFAULT_CODEX_APPROVAL_POLICY;
   return {
+    requestedSandboxMode,
     sandboxMode,
+    sandboxModeAdjustedForNetworkAccess: sandboxMode !== requestedSandboxMode,
     approvalPolicy,
+    networkAccessEnabled,
     bypassedApprovalsAndSandbox: sandboxMode === "danger-full-access",
     model: normalizeOptionalText(contract.model),
     reasoning: normalizeOptionalText(contract.reasoning),
   };
+}
+
+function resolveEffectiveCodexSandboxMode(input: {
+  requestedSandboxMode: WorkerNodeCodexSandboxMode;
+  networkAccessEnabled: boolean | null;
+}): WorkerNodeCodexSandboxMode {
+  if (input.requestedSandboxMode === "read-only" && input.networkAccessEnabled === true) {
+    return "workspace-write";
+  }
+
+  return input.requestedSandboxMode;
 }
 
 function normalizeCodexSandboxMode(value: unknown): WorkerNodeCodexSandboxMode | null {
@@ -951,6 +998,10 @@ function normalizeCodexApprovalPolicy(value: unknown): WorkerNodeCodexApprovalPo
   return normalized && CODEX_APPROVAL_POLICIES.has(normalized as WorkerNodeCodexApprovalPolicy)
     ? normalized as WorkerNodeCodexApprovalPolicy
     : null;
+}
+
+function normalizeOptionalBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
 }
 
 function buildConfigArgs(configOverrides: Record<string, unknown>) {
