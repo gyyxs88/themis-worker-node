@@ -14,6 +14,9 @@ const MAX_GIT_STATUS_LINES = 20;
 const COMPLETION_SCHEMA_VERSION = 1;
 const WORKER_DISABLED_CODEX_FEATURES = ["plugins", "memories", "general_analytics"] as const;
 const DEFAULT_PROVIDER_ENV_KEY = "THEMIS_OPENAI_COMPAT_API_KEY";
+const DEFAULT_SECRET_STORE_FILE = "infra/local/worker-secrets.json";
+const REDACTED_SECRET = "[REDACTED_SECRET]";
+const SECRET_ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 
 export interface WorkerNodeLocalExecutorCommandInput {
   cwd: string;
@@ -77,6 +80,7 @@ interface WorkerNodeCodexExecutionResult extends WorkerNodeCodexStructuredResult
   bypassedApprovalsAndSandbox: boolean;
   model: string | null;
   reasoning: string | null;
+  secretEnvRefs: WorkerNodeSecretEnvRefStatus[];
   completedAt: string;
 }
 
@@ -125,6 +129,22 @@ interface WorkerNodeCodexExecutionOptions {
   reasoning: string | null;
 }
 
+interface WorkerNodeSecretEnvRef {
+  envName: string;
+  secretRef: string;
+  required: boolean;
+}
+
+interface WorkerNodeSecretEnvRefStatus extends WorkerNodeSecretEnvRef {
+  status: "injected" | "missing";
+}
+
+interface WorkerNodeSecretResolution {
+  env: Record<string, string>;
+  refs: WorkerNodeSecretEnvRefStatus[];
+  values: string[];
+}
+
 const DEFAULT_CODEX_SANDBOX_MODE: WorkerNodeCodexSandboxMode = "workspace-write";
 const DEFAULT_CODEX_APPROVAL_POLICY: WorkerNodeCodexApprovalPolicy = "never";
 const CODEX_SANDBOX_MODES = new Set<WorkerNodeCodexSandboxMode>([
@@ -157,6 +177,10 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
       );
       const reportDirectory = join(reportRootDirectory, assignedRun.run.runId);
       mkdirSync(reportDirectory, { recursive: true });
+      const secretResolution = resolveSecretEnvRefs(assignedRun.executionContract, {
+        env,
+        workingDirectory,
+      });
       const runtimeContext = materializeWorkerNodeRuntimeContext({
         workingDirectory,
         env,
@@ -177,6 +201,7 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
         runtimeContext,
         reportDirectory,
         env,
+        secretResolution,
         now,
         commandRunner,
       });
@@ -234,6 +259,7 @@ export function createLocalWorkerExecutor(options: CreateLocalWorkerExecutorOpti
           bypassedApprovalsAndSandbox: codexExecution.bypassedApprovalsAndSandbox,
           model: codexExecution.model,
           reasoning: codexExecution.reasoning,
+          secretEnvRefs: codexExecution.secretEnvRefs,
           workspacePath,
           runtimeContext,
           workspaceEntryCount: workspace.entryCount,
@@ -377,11 +403,12 @@ async function runCodexExecution(input: {
   runtimeContext: ReturnType<typeof materializeWorkerNodeRuntimeContext>;
   reportDirectory: string;
   env: NodeJS.ProcessEnv;
+  secretResolution: WorkerNodeSecretResolution;
   now: () => string;
   commandRunner: WorkerNodeLocalExecutorCommandRunner;
 }): Promise<WorkerNodeCodexExecutionResult> {
   const executionOptions = resolveCodexExecutionOptions(input.assignedRun.executionContract);
-  const prompt = buildCodexPrompt(input.assignedRun, input.workspacePath, executionOptions);
+  const prompt = buildCodexPrompt(input.assignedRun, input.workspacePath, executionOptions, input.secretResolution.refs);
   const promptFile = join(input.reportDirectory, "prompt.txt");
   const outputFile = join(input.reportDirectory, "last-message.txt");
   const resultFile = join(input.reportDirectory, "result.json");
@@ -393,7 +420,7 @@ async function runCodexExecution(input: {
   writeFileSync(outputSchemaFile, `${JSON.stringify(buildCompletionOutputSchema(), null, 2)}\n`, "utf8");
 
   const providerConfig = readProviderConfig(input.runtimeContext.providerFile);
-  const codexEnv = buildCodexExecutionEnv(input.env, input.runtimeContext, providerConfig);
+  const codexEnv = buildCodexExecutionEnv(input.env, input.runtimeContext, providerConfig, input.secretResolution.env);
   const codexCommand = resolveCodexCommand(input.workingDirectory, input.env);
   const args = buildCodexExecArgs({
     workspacePath: input.workspacePath,
@@ -416,13 +443,17 @@ async function runCodexExecution(input: {
     {
       stdoutLogFile,
       stderrLogFile,
+      redactText: (text) => redactSecrets(text, input.secretResolution.values),
     },
   );
 
-  writeFileSync(stdoutLogFile, commandResult.stdout, "utf8");
-  writeFileSync(stderrLogFile, commandResult.stderr, "utf8");
+  const stdout = redactSecrets(commandResult.stdout, input.secretResolution.values);
+  const stderr = redactSecrets(commandResult.stderr, input.secretResolution.values);
+  writeFileSync(stdoutLogFile, stdout, "utf8");
+  writeFileSync(stderrLogFile, stderr, "utf8");
 
-  const rawResponse = readTextFileOrEmpty(outputFile);
+  const rawResponse = redactSecrets(readTextFileOrEmpty(outputFile), input.secretResolution.values);
+  writeFileSync(outputFile, rawResponse, "utf8");
   const structuredResult = parseCodexStructuredResult(rawResponse);
   const resolvedArtifactPaths = structuredResult.artifactPaths
     .map((artifactPath) => resolveArtifactPath(input.workspacePath, artifactPath))
@@ -448,8 +479,8 @@ async function runCodexExecution(input: {
     resultJson,
     deliverableContent,
     rawResponse,
-    stdout: commandResult.stdout,
-    stderr: commandResult.stderr,
+    stdout,
+    stderr,
     resolvedArtifactPaths,
     requestedSandboxMode: executionOptions.requestedSandboxMode,
     sandboxMode: executionOptions.sandboxMode,
@@ -459,6 +490,7 @@ async function runCodexExecution(input: {
     bypassedApprovalsAndSandbox: executionOptions.bypassedApprovalsAndSandbox,
     model: executionOptions.model,
     reasoning: executionOptions.reasoning,
+    secretEnvRefs: input.secretResolution.refs,
     completedAt: input.now(),
   };
 }
@@ -471,17 +503,27 @@ async function runCodexCommandWithFailureArtifacts(
   artifacts: {
     stdoutLogFile: string;
     stderrLogFile: string;
+    redactText?: (text: string) => string;
   },
 ): Promise<WorkerNodeLocalExecutorCommandResult> {
   try {
     return await commandRunner(command, args, input);
   } catch (error) {
     if (error instanceof WorkerNodeCommandError) {
-      writeFileSync(artifacts.stdoutLogFile, error.stdout, "utf8");
-      writeFileSync(artifacts.stderrLogFile, error.stderr, "utf8");
+      const stdout = artifacts.redactText ? artifacts.redactText(error.stdout) : error.stdout;
+      const stderr = artifacts.redactText ? artifacts.redactText(error.stderr) : error.stderr;
+      const redactedError = new WorkerNodeCommandError({
+        message: error.message,
+        exitCode: error.exitCode,
+        signal: error.signal,
+        stdout,
+        stderr,
+      });
+      writeFileSync(artifacts.stdoutLogFile, stdout, "utf8");
+      writeFileSync(artifacts.stderrLogFile, stderr, "utf8");
       throw new WorkerNodeExecutionError(
-        buildCodexCommandFailureMessage(error, artifacts.stderrLogFile),
-        classifyCodexCommandFailure(error),
+        buildCodexCommandFailureMessage(redactedError, artifacts.stderrLogFile),
+        classifyCodexCommandFailure(redactedError),
       );
     }
 
@@ -533,6 +575,7 @@ function writeExecutionReport(input: {
       sandboxMode: input.codexExecution.requestedSandboxMode,
       approvalPolicy: input.codexExecution.approvalPolicy,
       networkAccessEnabled: input.codexExecution.networkAccessEnabled,
+      secretEnvRefs: input.codexExecution.secretEnvRefs,
     },
     result: {
       schemaVersion: COMPLETION_SCHEMA_VERSION,
@@ -569,6 +612,7 @@ function writeExecutionReport(input: {
       bypassedApprovalsAndSandbox: input.codexExecution.bypassedApprovalsAndSandbox,
       model: input.codexExecution.model,
       reasoning: input.codexExecution.reasoning,
+      secretEnvRefs: input.codexExecution.secretEnvRefs,
       promptFile: input.codexExecution.promptFile,
       outputFile: input.codexExecution.outputFile,
       resultFile: input.codexExecution.resultFile,
@@ -780,10 +824,167 @@ function toErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function resolveSecretEnvRefs(
+  contract: Parameters<WorkerNodeExecutor["execute"]>[0]["assignedRun"]["executionContract"],
+  input: {
+    env: NodeJS.ProcessEnv;
+    workingDirectory: string;
+  },
+): WorkerNodeSecretResolution {
+  const refs = normalizeContractSecretEnvRefs((contract as Record<string, unknown>).secretEnvRefs);
+  const store = refs.length > 0 ? readWorkerSecretStore(input) : {};
+  const injectedEnv: Record<string, string> = {};
+  const secretValues: string[] = [];
+  const statuses: WorkerNodeSecretEnvRefStatus[] = [];
+
+  for (const ref of refs) {
+    const value = lookupWorkerSecretValue(ref, input.env, store);
+
+    if (value) {
+      injectedEnv[ref.envName] = value;
+      secretValues.push(value);
+      statuses.push({ ...ref, status: "injected" });
+      continue;
+    }
+
+    statuses.push({ ...ref, status: "missing" });
+
+    if (ref.required) {
+      const candidateEnvName = `THEMIS_WORKER_SECRET_${normalizeSecretRefEnvSuffix(ref.secretRef)}`;
+      throw new WorkerNodeExecutionError(
+        `Required worker secret is unavailable: ${ref.secretRef} for ${ref.envName}. Configure ${candidateEnvName} or THEMIS_WORKER_SECRET_STORE_FILE.`,
+        "WORKER_NODE_SECRET_UNAVAILABLE",
+      );
+    }
+  }
+
+  return {
+    env: injectedEnv,
+    refs: statuses,
+    values: Array.from(new Set(secretValues)),
+  };
+}
+
+function normalizeContractSecretEnvRefs(value: unknown): WorkerNodeSecretEnvRef[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => {
+      if (!isRecord(entry)) {
+        return null;
+      }
+
+      const envName = normalizeOptionalText(entry.envName);
+      const secretRef = normalizeOptionalText(entry.secretRef);
+
+      if (!envName || !SECRET_ENV_NAME_PATTERN.test(envName) || !secretRef) {
+        return null;
+      }
+
+      return {
+        envName,
+        secretRef,
+        required: entry.required === true,
+      };
+    })
+    .filter((entry): entry is WorkerNodeSecretEnvRef => entry !== null);
+}
+
+function readWorkerSecretStore(input: {
+  env: NodeJS.ProcessEnv;
+  workingDirectory: string;
+}): Record<string, unknown> {
+  const configuredPath = normalizeOptionalText(input.env.THEMIS_WORKER_SECRET_STORE_FILE);
+  const storeFile = configuredPath
+    ? resolve(input.workingDirectory, configuredPath)
+    : resolve(input.workingDirectory, DEFAULT_SECRET_STORE_FILE);
+
+  if (!existsSync(storeFile)) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(storeFile, "utf8")) as unknown;
+    return isRecord(parsed) ? parsed : {};
+  } catch (error) {
+    throw new WorkerNodeExecutionError(
+      `Worker secret store is invalid: ${storeFile}: ${toErrorMessage(error)}`,
+      "WORKER_NODE_SECRET_STORE_INVALID",
+    );
+  }
+}
+
+function lookupWorkerSecretValue(
+  ref: WorkerNodeSecretEnvRef,
+  env: NodeJS.ProcessEnv,
+  store: Record<string, unknown>,
+): string | null {
+  const envKeys = [
+    `THEMIS_WORKER_SECRET_${normalizeSecretRefEnvSuffix(ref.secretRef)}`,
+    `THEMIS_WORKER_SECRET_${ref.envName}`,
+  ];
+
+  for (const envKey of envKeys) {
+    const value = normalizeOptionalText(env[envKey]);
+
+    if (value) {
+      return value;
+    }
+  }
+
+  for (const key of [ref.secretRef, ref.envName]) {
+    const entry = store[key];
+    const value = normalizeSecretStoreEntry(entry);
+
+    if (value) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function normalizeSecretStoreEntry(value: unknown): string | null {
+  const directValue = normalizeOptionalText(value);
+
+  if (directValue) {
+    return directValue;
+  }
+
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  return normalizeOptionalText(value.value);
+}
+
+function normalizeSecretRefEnvSuffix(secretRef: string): string {
+  return secretRef
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    || "SECRET";
+}
+
+function redactSecrets(text: string, secretValues: string[]): string {
+  if (!text || secretValues.length === 0) {
+    return text;
+  }
+
+  return [...secretValues]
+    .filter((value) => value.length > 0)
+    .sort((left, right) => right.length - left.length)
+    .reduce((current, value) => current.split(value).join(REDACTED_SECRET), text);
+}
+
 function buildCodexPrompt(
   assignedRun: Parameters<WorkerNodeExecutor["execute"]>[0]["assignedRun"],
   workspacePath: string,
   executionOptions: WorkerNodeCodexExecutionOptions,
+  secretEnvRefs: WorkerNodeSecretEnvRefStatus[],
 ) {
   const readOnly = executionOptions.requestedSandboxMode === "read-only";
   const sandboxLines = [
@@ -796,6 +997,15 @@ function buildCodexPrompt(
       : []),
     `- networkAccessEnabled: ${executionOptions.networkAccessEnabled ?? "default"}`,
   ];
+  const injectedSecretLines = secretEnvRefs.length > 0
+    ? [
+        "",
+        "可用 secret 环境变量（只展示变量名和引用名，不展示值）：",
+        ...secretEnvRefs.map((entry) =>
+          `- ${entry.envName}: secretRef=${entry.secretRef}, required=${entry.required}, status=${entry.status}`
+        ),
+      ]
+    : [];
   return [
     "你正在 Themis Worker Node 上执行一条真实工单。",
     "",
@@ -820,6 +1030,8 @@ function buildCodexPrompt(
       : "2. 如果你产出了值得交付的文件，请把相对当前工作区的路径写进 artifactPaths。",
     "3. 不要向人追问额外输入；在现有上下文下尽最大努力完成，并明确写出不确定性。",
     "4. 最终输出必须符合 JSON schema：summary 用一句话概括结果，deliverable 写完整可读的交付正文，artifactPaths/followUp 用字符串数组。",
+    "5. 如果使用 secret 环境变量，只能在命令环境中读取，不要在 stdout、stderr、deliverable、artifactPaths、followUp 或写入文件中回显真实 secret 值。",
+    ...injectedSecretLines,
   ].join("\n");
 }
 
@@ -877,6 +1089,7 @@ function buildCodexExecutionEnv(
   env: NodeJS.ProcessEnv,
   runtimeContext: ReturnType<typeof materializeWorkerNodeRuntimeContext>,
   providerConfig: WorkerNodeProviderConfig | null,
+  secretEnv: Record<string, string>,
 ) {
   const nextEnv = Object.fromEntries(
     Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
@@ -887,6 +1100,10 @@ function buildCodexExecutionEnv(
 
   if (providerConfig?.apiKey) {
     nextEnv[DEFAULT_PROVIDER_ENV_KEY] = providerConfig.apiKey;
+  }
+
+  for (const [key, value] of Object.entries(secretEnv)) {
+    nextEnv[key] = value;
   }
 
   return nextEnv;
@@ -1153,6 +1370,10 @@ function isCommandFailureNoiseLine(line: string) {
 
 function normalizeOptionalText(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function resolveCodexCommand(workingDirectory: string, env: NodeJS.ProcessEnv) {

@@ -317,6 +317,127 @@ test("createLocalWorkerExecutor 会把只读联网工单映射为 Codex 可联�
   }
 });
 
+test("createLocalWorkerExecutor 会从 worker 本地 secret store 注入环境变量并脱敏产物", async () => {
+  const root = join(tmpdir(), `themis-worker-node-local-executor-secret-${Date.now()}`);
+  const workspacePath = join(root, "workspace");
+  const codexHome = join(root, "codex-home");
+  const codexBin = join(root, "codex");
+  const secretValue = "cf-secret-value-123456";
+  mkdirSync(workspacePath, { recursive: true });
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(join(workspacePath, "README.md"), "# worker\n", "utf8");
+  writeFileSync(join(codexHome, "auth.json"), "{\"token\":\"default\"}\n", "utf8");
+  writeFileSync(codexBin, "#!/bin/sh\n", "utf8");
+
+  const executor = createLocalWorkerExecutor({
+    workingDirectory: root,
+    env: {
+      CODEX_HOME: codexHome,
+      THEMIS_WORKER_CODEX_BIN: codexBin,
+      THEMIS_PROVIDER_OPENAI_BASE_URL: "https://api.openai.example.com",
+      THEMIS_PROVIDER_OPENAI_API_KEY: "provider-secret",
+      THEMIS_WORKER_SECRET_CLOUDFLARE_READONLY_TOKEN: secretValue,
+    },
+    now: () => "2026-04-14T12:30:00.000Z",
+    commandRunner: async (command, args, input) => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { stdout: "false\n", stderr: "" };
+      }
+
+      if (command === codexBin && args[0] === "exec") {
+        assert.equal(input.env?.CLOUDFLARE_API_TOKEN, secretValue);
+        const outputFile = args[args.indexOf("-o") + 1];
+        assert.ok(outputFile);
+        writeFileSync(String(outputFile), JSON.stringify({
+          summary: "Secret 注入验证完成。",
+          deliverable: `不能回显 ${secretValue}`,
+          artifactPaths: [],
+          followUp: [`轮换 ${secretValue}`],
+        }, null, 2), "utf8");
+        return {
+          stdout: `stdout saw ${secretValue}\n`,
+          stderr: `stderr saw ${secretValue}\n`,
+        };
+      }
+
+      throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
+    },
+  });
+
+  try {
+    const result = await executor.execute({
+      assignedRun: createAssignedRun(workspacePath, {
+        secretEnvRefs: [{
+          envName: "CLOUDFLARE_API_TOKEN",
+          secretRef: "cloudflare-readonly-token",
+          required: true,
+        }],
+      }),
+    });
+
+    assert.equal(result.kind, "completed");
+    const reportFile = result.touchedFiles?.[0];
+    assert.ok(reportFile);
+    const reportContent = readFileSync(reportFile, "utf8");
+    assert.doesNotMatch(reportContent, new RegExp(secretValue));
+    assert.match(reportContent, /\[REDACTED_SECRET\]/);
+
+    const structuredOutput = result.structuredOutput as Record<string, any>;
+    assert.deepEqual(structuredOutput.secretEnvRefs, [{
+      envName: "CLOUDFLARE_API_TOKEN",
+      secretRef: "cloudflare-readonly-token",
+      required: true,
+      status: "injected",
+    }]);
+    const artifactContents = JSON.stringify(structuredOutput.artifactContents);
+    assert.doesNotMatch(artifactContents, new RegExp(secretValue));
+    assert.match(artifactContents, /\[REDACTED_SECRET\]/);
+    assert.match(String(structuredOutput.artifactContents.prompt.content), /CLOUDFLARE_API_TOKEN/);
+    assert.match(String(structuredOutput.artifactContents.prompt.content), /cloudflare-readonly-token/);
+    assert.doesNotMatch(String(structuredOutput.artifactContents.prompt.content), new RegExp(secretValue));
+
+    const stdoutLogFile = structuredOutput.stdoutLogFile as string;
+    const stderrLogFile = structuredOutput.stderrLogFile as string;
+    assert.doesNotMatch(readFileSync(stdoutLogFile, "utf8"), new RegExp(secretValue));
+    assert.doesNotMatch(readFileSync(stderrLogFile, "utf8"), new RegExp(secretValue));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("createLocalWorkerExecutor 会在 required secret 无法解析时阻止执行", async () => {
+  const root = join(tmpdir(), `themis-worker-node-local-executor-secret-missing-${Date.now()}`);
+  const workspacePath = join(root, "workspace");
+  mkdirSync(workspacePath, { recursive: true });
+
+  const executor = createLocalWorkerExecutor({
+    workingDirectory: root,
+    commandRunner: async () => {
+      throw new Error("codex should not run when a required secret is missing");
+    },
+  });
+
+  try {
+    await assert.rejects(
+      executor.execute({
+        assignedRun: createAssignedRun(workspacePath, {
+          secretEnvRefs: [{
+            envName: "CLOUDFLARE_API_TOKEN",
+            secretRef: "cloudflare-readonly-token",
+            required: true,
+          }],
+        }),
+      }),
+      (error) =>
+        error instanceof WorkerNodeExecutionError
+        && error.failureCode === "WORKER_NODE_SECRET_UNAVAILABLE"
+        && /cloudflare-readonly-token/.test(error.message),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("createLocalWorkerExecutor 会在工作区无效时抛出边界错误", async () => {
   const root = join(tmpdir(), `themis-worker-node-local-executor-invalid-${Date.now()}`);
   mkdirSync(root, { recursive: true });
