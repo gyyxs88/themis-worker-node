@@ -141,6 +141,7 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
         assert.equal(input.cwd, workspacePath);
         assert.ok(input.env?.HOME?.endsWith("/infra/local/worker-runtime/run-alpha/home"));
         assert.ok(input.env?.CODEX_HOME?.endsWith("/infra/local/worker-runtime/run-alpha/codex-home"));
+        assert.equal(input.env?.THEMIS_WORKER_NODE_ID, "node-alpha");
         assert.equal(input.env?.THEMIS_OPENAI_COMPAT_API_KEY, "provider-secret");
         return {
           stdout: "codex\nexecution complete\n",
@@ -207,6 +208,7 @@ test("createLocalWorkerExecutor 会检查本地工作区并写出执行报告", 
     const artifactContents = structuredOutput?.artifactContents as Record<string, any> | undefined;
     assert.equal(artifactContents?.prompt?.label, "执行 prompt");
     assert.match(String(artifactContents?.prompt?.content ?? ""), /验证 worker 本机执行器会生成 report/);
+    assert.match(String(artifactContents?.prompt?.content ?? ""), /nodeId: node-alpha/);
     assert.match(String(artifactContents?.prompt?.content ?? ""), /sandboxMode: read-only/);
     assert.match(String(artifactContents?.prompt?.content ?? ""), /只能读取和分析/);
     assert.equal(artifactContents?.prompt?.truncated, false);

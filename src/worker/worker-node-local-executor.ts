@@ -420,7 +420,13 @@ async function runCodexExecution(input: {
   writeFileSync(outputSchemaFile, `${JSON.stringify(buildCompletionOutputSchema(), null, 2)}\n`, "utf8");
 
   const providerConfig = readProviderConfig(input.runtimeContext.providerFile);
-  const codexEnv = buildCodexExecutionEnv(input.env, input.runtimeContext, providerConfig, input.secretResolution.env);
+  const codexEnv = buildCodexExecutionEnv(
+    input.env,
+    input.runtimeContext,
+    providerConfig,
+    input.secretResolution.env,
+    resolveAssignedWorkerNodeId(input.assignedRun),
+  );
   const codexCommand = resolveCodexCommand(input.workingDirectory, input.env);
   const args = buildCodexExecArgs({
     workspacePath: input.workspacePath,
@@ -986,6 +992,7 @@ function buildCodexPrompt(
   executionOptions: WorkerNodeCodexExecutionOptions,
   secretEnvRefs: WorkerNodeSecretEnvRefStatus[],
 ) {
+  const workerNodeId = resolveAssignedWorkerNodeId(assignedRun);
   const readOnly = executionOptions.requestedSandboxMode === "read-only";
   const sandboxLines = [
     `- sandboxMode: ${executionOptions.requestedSandboxMode}`,
@@ -1011,6 +1018,7 @@ function buildCodexPrompt(
     "",
     "工单上下文：",
     `- runId: ${assignedRun.run.runId}`,
+    `- nodeId: ${workerNodeId}`,
     `- workItemId: ${assignedRun.workItem.workItemId}`,
     `- targetAgent: ${assignedRun.targetAgent.displayName}`,
     `- priority: ${assignedRun.workItem.priority}`,
@@ -1090,6 +1098,7 @@ function buildCodexExecutionEnv(
   runtimeContext: ReturnType<typeof materializeWorkerNodeRuntimeContext>,
   providerConfig: WorkerNodeProviderConfig | null,
   secretEnv: Record<string, string>,
+  workerNodeId: string,
 ) {
   const nextEnv = Object.fromEntries(
     Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
@@ -1097,6 +1106,7 @@ function buildCodexExecutionEnv(
 
   nextEnv.HOME = runtimeContext.homeDirectory;
   nextEnv.CODEX_HOME = runtimeContext.codexHome;
+  nextEnv.THEMIS_WORKER_NODE_ID = workerNodeId;
 
   if (providerConfig?.apiKey) {
     nextEnv[DEFAULT_PROVIDER_ENV_KEY] = providerConfig.apiKey;
@@ -1107,6 +1117,13 @@ function buildCodexExecutionEnv(
   }
 
   return nextEnv;
+}
+
+function resolveAssignedWorkerNodeId(assignedRun: Parameters<WorkerNodeExecutor["execute"]>[0]["assignedRun"]) {
+  return normalizeOptionalText(assignedRun.run.nodeId)
+    ?? normalizeOptionalText(assignedRun.node.nodeId)
+    ?? normalizeOptionalText(assignedRun.executionLease.nodeId)
+    ?? "unknown";
 }
 
 function buildCodexExecArgs(input: {
