@@ -4,6 +4,10 @@ import {
   type ManagedAgentPlatformNodeHeartbeatPayload,
   type ManagedAgentPlatformNodeRegisterPayload,
   type ManagedAgentPlatformWorkerPullPayload,
+  type ManagedAgentPlatformWorkerSecretAckInput,
+  type ManagedAgentPlatformWorkerSecretAckPayload,
+  type ManagedAgentPlatformWorkerSecretPullInput,
+  type ManagedAgentPlatformWorkerSecretPullPayload,
   type ManagedAgentPlatformWorkerRunCompletePayload,
   type ManagedAgentPlatformWorkerRunStatusPayload,
   type ManagedAgentPlatformWorkerNodeListInput,
@@ -92,6 +96,42 @@ export function createPullAssignedRunRequest(
     body: {
       ownerPrincipalId: config.ownerPrincipalId,
       nodeId: input.nodeId,
+    },
+  };
+}
+
+export function createPullWorkerSecretsRequest(
+  config: WorkerPlatformConfig,
+  input: ManagedAgentPlatformWorkerSecretPullInput,
+): WorkerPlatformRequest<ManagedAgentPlatformWorkerSecretPullPayload> {
+  return {
+    url: `${trimTrailingSlash(config.baseUrl)}/api/platform/worker/secrets/pull`,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: buildPlatformServiceAuthorizationHeader(config.webAccessToken),
+    },
+    body: {
+      ownerPrincipalId: config.ownerPrincipalId,
+      nodeId: input.nodeId,
+    },
+  };
+}
+
+export function createAckWorkerSecretsRequest(
+  config: WorkerPlatformConfig,
+  input: ManagedAgentPlatformWorkerSecretAckInput,
+): WorkerPlatformRequest<ManagedAgentPlatformWorkerSecretAckPayload> {
+  return {
+    url: `${trimTrailingSlash(config.baseUrl)}/api/platform/worker/secrets/ack`,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: buildPlatformServiceAuthorizationHeader(config.webAccessToken),
+    },
+    body: {
+      ownerPrincipalId: config.ownerPrincipalId,
+      nodeId: input.nodeId,
+      deliveryIds: input.deliveryIds,
+      ...(input.secretRefs ? { secretRefs: input.secretRefs } : {}),
     },
   };
 }

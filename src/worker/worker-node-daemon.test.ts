@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { WorkerNodeDaemon, WorkerNodeExecutionError } from "./worker-node-daemon.js";
 
@@ -88,6 +91,14 @@ test("WorkerNodeDaemon 会执行 register -> heartbeat -> pull -> complete 最�
         },
       };
     },
+    async pullWorkerSecrets(nodeId: unknown) {
+      calls.push(["pullWorkerSecrets", nodeId]);
+      return { deliveries: [] };
+    },
+    async ackWorkerSecrets(input: unknown) {
+      calls.push(["ackWorkerSecrets", input]);
+      return { deliveries: [], secretRefs: [] };
+    },
     async pullAssignedRun(nodeId: unknown) {
       calls.push(["pullAssignedRun", nodeId]);
       return createAssignedRun();
@@ -130,18 +141,19 @@ test("WorkerNodeDaemon 会执行 register -> heartbeat -> pull -> complete 最�
     reportFile: null,
   });
   assert.equal(calls[0]?.[0], "registerNode");
-  assert.equal(calls[1]?.[0], "heartbeatNode");
-  assert.deepEqual(calls[3], ["heartbeatNode", {
+  assert.equal(calls[1]?.[0], "pullWorkerSecrets");
+  assert.equal(calls[2]?.[0], "heartbeatNode");
+  assert.deepEqual(calls[4], ["heartbeatNode", {
     nodeId: "node-alpha",
     slotAvailable: 0,
   }]);
-  assert.deepEqual(calls[4], ["updateRunStatus", {
+  assert.deepEqual(calls[5], ["updateRunStatus", {
     nodeId: "node-alpha",
     runId: "run-alpha",
     leaseToken: "lease-token-alpha",
     status: "starting",
   }]);
-  assert.deepEqual(calls[5], ["completeRun", {
+  assert.deepEqual(calls[6], ["completeRun", {
     nodeId: "node-alpha",
     runId: "run-alpha",
     leaseToken: "lease-token-alpha",
@@ -150,6 +162,84 @@ test("WorkerNodeDaemon 会执行 register -> heartbeat -> pull -> complete 最�
       touchedFiles: ["src/index.ts"],
     },
   }]);
+});
+
+test("WorkerNodeDaemon 会先同步平台下发的 secret 再上报 secret capability", async () => {
+  const root = mkdtempSync(join(tmpdir(), `themis-worker-node-secret-${Date.now()}`));
+  const calls: Array<[string, unknown]> = [];
+  const client = {
+    async registerNode(input: unknown) {
+      calls.push(["registerNode", input]);
+      return { node: { nodeId: "node-alpha" } };
+    },
+    async heartbeatNode(input: unknown) {
+      calls.push(["heartbeatNode", input]);
+      return { node: { nodeId: "node-alpha" } };
+    },
+    async pullWorkerSecrets(nodeId: unknown) {
+      calls.push(["pullWorkerSecrets", nodeId]);
+      return {
+        deliveries: [{
+          deliveryId: "delivery-alpha",
+          nodeId: "node-alpha",
+          secretRef: "cloudflare-readonly-token",
+          value: "worker-secret-value",
+          status: "pending",
+          createdAt: "2026-04-27T12:00:00.000Z",
+          updatedAt: "2026-04-27T12:00:00.000Z",
+        }],
+      };
+    },
+    async ackWorkerSecrets(input: unknown) {
+      calls.push(["ackWorkerSecrets", input]);
+      return { deliveries: [], secretRefs: ["cloudflare-readonly-token"] };
+    },
+    async pullAssignedRun(nodeId: unknown) {
+      calls.push(["pullAssignedRun", nodeId]);
+      return null;
+    },
+    async updateRunStatus() {
+      throw new Error("should not update run");
+    },
+    async completeRun() {
+      throw new Error("should not complete");
+    },
+  };
+  const daemon = new WorkerNodeDaemon({
+    client: client as never,
+    executor: {
+      async execute() {
+        throw new Error("should not execute");
+      },
+    },
+    node: {
+      displayName: "Worker Alpha",
+      slotCapacity: 1,
+    },
+    workingDirectory: root,
+    env: {},
+  });
+
+  try {
+    const result = await daemon.runOnce();
+
+    assert.equal(result.result, "idle");
+    assert.deepEqual(JSON.parse(readFileSync(join(root, "infra/local/worker-secrets.json"), "utf8")), {
+      "cloudflare-readonly-token": "worker-secret-value",
+    });
+    assert.deepEqual(calls[2], ["ackWorkerSecrets", {
+      nodeId: "node-alpha",
+      deliveryIds: ["delivery-alpha"],
+      secretRefs: ["cloudflare-readonly-token"],
+    }]);
+    assert.deepEqual(calls[3], ["heartbeatNode", {
+      nodeId: "node-alpha",
+      slotAvailable: 1,
+      secretCapabilities: ["cloudflare-readonly-token"],
+    }]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("WorkerNodeDaemon 会把 waiting_human 回传给平台", async () => {
@@ -161,6 +251,12 @@ test("WorkerNodeDaemon 会把 waiting_human 回传给平台", async () => {
     async heartbeatNode(input: unknown) {
       calls.push(["heartbeatNode", input]);
       return {};
+    },
+    async pullWorkerSecrets() {
+      return { deliveries: [] };
+    },
+    async ackWorkerSecrets() {
+      return { deliveries: [], secretRefs: [] };
     },
     async pullAssignedRun() {
       return createAssignedRun();
@@ -219,6 +315,12 @@ test("WorkerNodeDaemon 会把执行失败回传给平台", async () => {
     },
     async heartbeatNode() {
       return {};
+    },
+    async pullWorkerSecrets() {
+      return { deliveries: [] };
+    },
+    async ackWorkerSecrets() {
+      return { deliveries: [], secretRefs: [] };
     },
     async pullAssignedRun() {
       return createAssignedRun();

@@ -127,6 +127,19 @@ test("themis-worker-node worker-node run --once 会执行最小闭环", async ()
           });
         }
 
+        if (String(url).endsWith("/api/platform/worker/secrets/pull")) {
+          return createJsonResponse(200, {
+            deliveries: [],
+          });
+        }
+
+        if (String(url).endsWith("/api/platform/worker/secrets/ack")) {
+          return createJsonResponse(200, {
+            deliveries: [],
+            secretRefs: [],
+          });
+        }
+
         if (String(url).endsWith("/api/platform/worker/runs/pull")) {
           return createJsonResponse(200, {
             organization: {

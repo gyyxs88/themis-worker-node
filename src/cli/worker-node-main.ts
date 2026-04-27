@@ -78,6 +78,8 @@ export async function runWorkerNodeCli(
     ...(readPositiveIntegerOption(parsed.options, "--poll-interval-ms")
       ? { pollIntervalMs: readPositiveIntegerOption(parsed.options, "--poll-interval-ms") ?? undefined }
       : {}),
+    workingDirectory,
+    env: process.env,
     log: (message) => {
       stdout.write(`${message}\n`);
     },

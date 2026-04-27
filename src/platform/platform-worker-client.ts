@@ -6,15 +6,20 @@ import type {
   ManagedAgentPlatformWorkerNodeRegistrationInput,
   ManagedAgentPlatformWorkerNodeHeartbeatInput,
   ManagedAgentPlatformWorkerProbeResult,
+  ManagedAgentPlatformWorkerSecretAckInput,
+  ManagedAgentPlatformWorkerSecretAckResult,
+  ManagedAgentPlatformWorkerSecretPullResult,
   ManagedAgentPlatformWorkerRunCompleteInput,
   ManagedAgentPlatformWorkerRunMutationResult,
   ManagedAgentPlatformWorkerRunStatusInput,
 } from "themis-contracts";
 import {
+  createAckWorkerSecretsRequest,
   createCompleteRunRequest,
   createHeartbeatNodeRequest,
   createListNodesRequest,
   createPullAssignedRunRequest,
+  createPullWorkerSecretsRequest,
   createRegisterNodeRequest,
   createUpdateRunStatusRequest,
   type WorkerPlatformConfig,
@@ -62,6 +67,27 @@ export class PlatformWorkerClient {
       && payload.executionLease && payload.executionContract
       ? payload as ManagedAgentPlatformWorkerAssignedRunResult
       : null;
+  }
+
+  async pullWorkerSecrets(nodeId: string): Promise<ManagedAgentPlatformWorkerSecretPullResult> {
+    const payload = await this.requestJson<Partial<ManagedAgentPlatformWorkerSecretPullResult>>(
+      createPullWorkerSecretsRequest(this.config, { nodeId }),
+    );
+
+    return {
+      deliveries: Array.isArray(payload.deliveries) ? payload.deliveries : [],
+    };
+  }
+
+  async ackWorkerSecrets(input: ManagedAgentPlatformWorkerSecretAckInput): Promise<ManagedAgentPlatformWorkerSecretAckResult> {
+    const payload = await this.requestJson<Partial<ManagedAgentPlatformWorkerSecretAckResult>>(
+      createAckWorkerSecretsRequest(this.config, input),
+    );
+
+    return {
+      deliveries: Array.isArray(payload.deliveries) ? payload.deliveries : [],
+      secretRefs: Array.isArray(payload.secretRefs) ? payload.secretRefs : [],
+    };
   }
 
   async updateRunStatus(input: ManagedAgentPlatformWorkerRunStatusInput): Promise<ManagedAgentPlatformWorkerRunMutationResult> {

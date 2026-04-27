@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  createAckWorkerSecretsRequest,
   createCompleteRunRequest,
   createHeartbeatNodeRequest,
   createListNodesRequest,
   createPullAssignedRunRequest,
+  createPullWorkerSecretsRequest,
   createRegisterNodeRequest,
   createUpdateRunStatusRequest,
 } from "./platform-worker-access.js";
@@ -32,6 +34,14 @@ test("themis-worker-node 会按 themis-contracts 契约构造节点与 run 请�
   const pullRun = createPullAssignedRunRequest(config, {
     nodeId: "node-alpha",
   });
+  const pullSecrets = createPullWorkerSecretsRequest(config, {
+    nodeId: "node-alpha",
+  });
+  const ackSecrets = createAckWorkerSecretsRequest(config, {
+    nodeId: "node-alpha",
+    deliveryIds: ["delivery-alpha"],
+    secretRefs: ["cloudflare-readonly-token"],
+  });
   const updateRun = createUpdateRunStatusRequest(config, {
     nodeId: "node-alpha",
     runId: "run-alpha",
@@ -55,6 +65,8 @@ test("themis-worker-node 会按 themis-contracts 契约构造节点与 run 请�
   assert.equal(heartbeat.url, "https://platform.example.com/api/platform/nodes/heartbeat");
   assert.equal(listNodes.url, "https://platform.example.com/api/platform/nodes/list");
   assert.equal(pullRun.url, "https://platform.example.com/api/platform/worker/runs/pull");
+  assert.equal(pullSecrets.url, "https://platform.example.com/api/platform/worker/secrets/pull");
+  assert.equal(ackSecrets.url, "https://platform.example.com/api/platform/worker/secrets/ack");
   assert.equal(updateRun.url, "https://platform.example.com/api/platform/worker/runs/update");
   assert.equal(completeRun.url, "https://platform.example.com/api/platform/worker/runs/complete");
   assert.equal(register.headers.Authorization, "Bearer worker-token");
@@ -83,6 +95,16 @@ test("themis-worker-node 会按 themis-contracts 契约构造节点与 run 请�
   assert.deepEqual(pullRun.body, {
     ownerPrincipalId: "principal-owner",
     nodeId: "node-alpha",
+  });
+  assert.deepEqual(pullSecrets.body, {
+    ownerPrincipalId: "principal-owner",
+    nodeId: "node-alpha",
+  });
+  assert.deepEqual(ackSecrets.body, {
+    ownerPrincipalId: "principal-owner",
+    nodeId: "node-alpha",
+    deliveryIds: ["delivery-alpha"],
+    secretRefs: ["cloudflare-readonly-token"],
   });
   assert.deepEqual(updateRun.body, {
     ownerPrincipalId: "principal-owner",

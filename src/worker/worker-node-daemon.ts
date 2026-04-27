@@ -5,6 +5,11 @@ import type {
   ManagedAgentPlatformWorkerWaitingActionPayload,
 } from "themis-contracts";
 import { PlatformWorkerClient } from "../platform/platform-worker-client.js";
+import {
+  listWorkerNodeSecretRefs,
+  upsertWorkerNodeSecrets,
+  type WorkerNodeSecretStoreOptions,
+} from "./worker-secret-store.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
@@ -54,6 +59,8 @@ export interface WorkerNodeDaemonOptions {
   executor: WorkerNodeExecutor;
   node: WorkerNodeDaemonNodeOptions;
   pollIntervalMs?: number;
+  workingDirectory?: string;
+  env?: NodeJS.ProcessEnv;
   log?: (message: string) => void;
 }
 
@@ -81,6 +88,7 @@ export class WorkerNodeDaemon {
   private readonly node: WorkerNodeDaemonNodeOptions;
   private readonly pollIntervalMs: number;
   private readonly log: (message: string) => void;
+  private readonly secretStoreOptions: WorkerNodeSecretStoreOptions;
   private currentNodeId: string | null;
 
   constructor(options: WorkerNodeDaemonOptions) {
@@ -92,11 +100,16 @@ export class WorkerNodeDaemon {
     };
     this.pollIntervalMs = normalizePositiveInteger(options.pollIntervalMs) ?? DEFAULT_POLL_INTERVAL_MS;
     this.log = options.log ?? (() => {});
+    this.secretStoreOptions = {
+      workingDirectory: options.workingDirectory ?? process.cwd(),
+      env: options.env ?? process.env,
+    };
     this.currentNodeId = normalizeOptionalText(options.node.nodeId);
   }
 
   async runOnce(): Promise<WorkerNodeDaemonRunResult> {
     const nodeId = await this.ensureNodeRegistered(this.idleSlotAvailable());
+    await this.syncWorkerSecrets(nodeId);
     await this.client.heartbeatNode({
       nodeId,
       slotAvailable: this.idleSlotAvailable(),
@@ -152,6 +165,28 @@ export class WorkerNodeDaemon {
     });
     this.currentNodeId = result.node.nodeId;
     return result.node.nodeId;
+  }
+
+  private async syncWorkerSecrets(nodeId: string): Promise<void> {
+    const result = await this.client.pullWorkerSecrets(nodeId);
+
+    if (result.deliveries.length === 0) {
+      return;
+    }
+
+    const secretRefs = upsertWorkerNodeSecrets(
+      this.secretStoreOptions,
+      result.deliveries.map((delivery) => ({
+        secretRef: delivery.secretRef,
+        value: delivery.value,
+      })),
+    );
+    await this.client.ackWorkerSecrets({
+      nodeId,
+      deliveryIds: result.deliveries.map((delivery) => delivery.deliveryId),
+      secretRefs,
+    });
+    this.log(`Worker Node 已同步 ${result.deliveries.length} 个 secret。`);
   }
 
   private async executeAssignedRun(
@@ -251,6 +286,7 @@ export class WorkerNodeDaemon {
       await this.client.heartbeatNode({
         nodeId,
         slotAvailable: this.idleSlotAvailable(),
+        ...this.buildNodeCapabilities(),
       }).catch(() => {});
     }
   }
@@ -271,6 +307,7 @@ export class WorkerNodeDaemon {
       ...(Array.isArray(this.node.providerCapabilities) && this.node.providerCapabilities.length > 0
         ? { providerCapabilities: this.node.providerCapabilities }
         : {}),
+      secretCapabilities: listWorkerNodeSecretRefs(this.secretStoreOptions),
       ...(normalizePositiveInteger(this.node.heartbeatTtlSeconds)
         ? { heartbeatTtlSeconds: normalizePositiveInteger(this.node.heartbeatTtlSeconds) ?? undefined }
         : {}),
