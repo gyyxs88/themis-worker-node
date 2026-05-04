@@ -17,6 +17,8 @@ const DEFAULT_PROVIDER_ENV_KEY = "THEMIS_OPENAI_COMPAT_API_KEY";
 const DEFAULT_SECRET_STORE_FILE = "infra/local/worker-secrets.json";
 const REDACTED_SECRET = "[REDACTED_SECRET]";
 const SECRET_ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
+const MAX_FACT_SOURCE_INSTRUCTION_LINES = 3;
+const MAX_FACT_SOURCE_TEXT_LENGTH = 220;
 
 export interface WorkerNodeLocalExecutorCommandInput {
   cwd: string;
@@ -1013,6 +1015,11 @@ function buildCodexPrompt(
         ),
       ]
     : [];
+  const readOnlyFactSourceLines = buildReadOnlyFactSourcePromptLines(
+    assignedRun,
+    executionOptions,
+    secretEnvRefs,
+  );
   return [
     "你正在 Themis Worker Node 上执行一条真实工单。",
     "",
@@ -1039,8 +1046,136 @@ function buildCodexPrompt(
     "3. 不要向人追问额外输入；在现有上下文下尽最大努力完成，并明确写出不确定性。",
     "4. 最终输出必须符合 JSON schema：summary 用一句话概括结果，deliverable 写完整可读的交付正文，artifactPaths/followUp 用字符串数组。",
     "5. 如果使用 secret 环境变量，只能在命令环境中读取，不要在 stdout、stderr、deliverable、artifactPaths、followUp 或写入文件中回显真实 secret 值。",
+    ...readOnlyFactSourceLines,
     ...injectedSecretLines,
   ].join("\n");
+}
+
+function buildReadOnlyFactSourcePromptLines(
+  assignedRun: Parameters<WorkerNodeExecutor["execute"]>[0]["assignedRun"],
+  executionOptions: WorkerNodeCodexExecutionOptions,
+  secretEnvRefs: WorkerNodeSecretEnvRefStatus[],
+) {
+  const contextPacket = isRecord(assignedRun.workItem.contextPacket)
+    ? assignedRun.workItem.contextPacket
+    : null;
+
+  if (!contextPacket) {
+    return [];
+  }
+
+  const packIds = normalizeStringArray(contextPacket.readOnlyFactSourcePackIds);
+  const factSources = normalizeReadOnlyFactSources(contextPacket.readOnlyFactSources);
+
+  if (packIds.length === 0 && factSources.length === 0) {
+    return [];
+  }
+
+  const safety = normalizeOptionalText(contextPacket.safety);
+  const secretStatuses = new Map(
+    secretEnvRefs.flatMap((entry) => [
+      [`env:${entry.envName}`, entry.status],
+      [`ref:${entry.secretRef}`, entry.status],
+    ]),
+  );
+  const lines = [
+    "",
+    "只读事实源上下文（平台注入，供 worker 可见；不包含任何 secret 值）：",
+    safety ? `- safety: ${sanitizePromptLine(safety)}` : null,
+    `- requestedSandboxMode: ${executionOptions.requestedSandboxMode}`,
+    `- effectiveCodexSandboxMode: ${executionOptions.sandboxMode}`,
+    `- networkAccessEnabled: ${executionOptions.networkAccessEnabled ?? "default"}`,
+    `- sandboxAdjustedForNetworkAccess: ${executionOptions.sandboxModeAdjustedForNetworkAccess}`,
+    packIds.length > 0 ? `- readOnlyFactSourcePackIds: ${packIds.map(sanitizePromptLine).join(", ")}` : null,
+  ].filter((line): line is string => Boolean(line));
+
+  if (factSources.length > 0) {
+    lines.push("- readOnlyFactSources:");
+
+    for (const source of factSources) {
+      lines.push(`  - ${source.id}: ${[
+        source.label,
+        source.mode ? `mode=${source.mode}` : null,
+        source.access ? `access=${source.access}` : null,
+        source.requiresNetworkAccess !== null ? `requiresNetworkAccess=${source.requiresNetworkAccess}` : null,
+      ].filter((part): part is string => Boolean(part)).map(sanitizePromptLine).join("; ")}`);
+
+      if (source.toolNames.length > 0) {
+        lines.push(`    - toolNames: ${source.toolNames.map(sanitizePromptLine).join(", ")}`);
+      }
+
+      if (source.expectedInputs.length > 0) {
+        lines.push(`    - expectedInputs: ${source.expectedInputs.map(sanitizePromptLine).join(", ")}`);
+      }
+
+      if (source.secretEnvRefs.length > 0) {
+        lines.push(
+          `    - secretEnvRefs: ${source.secretEnvRefs.map((ref) => {
+            const status = secretStatuses.get(`env:${ref.envName}`)
+              ?? secretStatuses.get(`ref:${ref.secretRef}`)
+              ?? "unknown";
+            return `${sanitizePromptLine(ref.envName)} -> ${sanitizePromptLine(ref.secretRef)} (required=${ref.required}, status=${status})`;
+          }).join("; ")}`,
+        );
+      }
+
+      if (source.instructions.length > 0) {
+        lines.push(`    - instructions: ${source.instructions.map(sanitizePromptLine).join(" / ")}`);
+      }
+    }
+  }
+
+  return lines;
+}
+
+interface WorkerNodeReadOnlyFactSourcePromptSummary {
+  id: string;
+  label: string | null;
+  mode: string | null;
+  access: string | null;
+  requiresNetworkAccess: boolean | null;
+  toolNames: string[];
+  expectedInputs: string[];
+  secretEnvRefs: WorkerNodeSecretEnvRef[];
+  instructions: string[];
+}
+
+function normalizeReadOnlyFactSources(value: unknown): WorkerNodeReadOnlyFactSourcePromptSummary[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!isRecord(entry)) {
+      return [];
+    }
+
+    const id = normalizeOptionalText(entry.id);
+
+    if (!id) {
+      return [];
+    }
+
+    return [{
+      id,
+      label: normalizeOptionalText(entry.label),
+      mode: normalizeOptionalText(entry.mode),
+      access: normalizeOptionalText(entry.access),
+      requiresNetworkAccess: normalizeOptionalBoolean(entry.requiresNetworkAccess),
+      toolNames: normalizeStringArray(entry.toolNames),
+      expectedInputs: normalizeStringArray(entry.expectedInputs),
+      secretEnvRefs: normalizeContractSecretEnvRefs(entry.secretEnvRefs),
+      instructions: normalizeStringArray(entry.instructions).slice(0, MAX_FACT_SOURCE_INSTRUCTION_LINES),
+    }];
+  });
+}
+
+function sanitizePromptLine(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+
+  return normalized.length > MAX_FACT_SOURCE_TEXT_LENGTH
+    ? `${normalized.slice(0, MAX_FACT_SOURCE_TEXT_LENGTH - 3)}...`
+    : normalized;
 }
 
 function buildCompletionOutputSchema() {

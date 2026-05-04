@@ -12,6 +12,7 @@
 - `src/platform/platform-worker-client.ts` 已提供最小平台 worker client
 - `src/worker/worker-node-daemon.ts` 已提供 `register -> sync secrets -> heartbeat(secretCapabilities) -> pull -> execute -> report` 最小 daemon 闭环
 - `src/worker/worker-node-local-executor.ts` 已通过真实 `codex exec` 执行任务，并产出 `prompt.txt`、`last-message.txt`、`result.json`、`deliverable.md`、`stdout.log`、`stderr.log`、`report.json`
+- read-only fact source 工单会把 `readOnlyFactSourcePackIds`、`readOnlyFactSources` 安全摘要、`secretEnvRefs` 引用状态和 requested/effective sandbox 审计说明写入 `prompt.txt`，只展示 secretRef，不展示 secret 值。
 - `src/runtime/worker-node-runtime-context.ts` 已提供每个 run 的 `runtime-context.json`、credential auth/config 复制与 provider 装配
 - `src/diagnostics/worker-node-diagnostics.ts` 已提供本地 `workspace / credential / provider` 与平台可达性预检
 - `src/cli/worker-node-main.ts` 已提供 `help`、`doctor worker-node`、`worker-node run --once` 与 `--report-root` 最小 CLI

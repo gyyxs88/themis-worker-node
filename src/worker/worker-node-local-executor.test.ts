@@ -10,6 +10,7 @@ import { createLocalWorkerExecutor } from "./worker-node-local-executor.js";
 function createAssignedRun(
   workspacePath: string,
   executionContract?: Partial<ManagedAgentPlatformWorkerAssignedRunResult["executionContract"]>,
+  workItem?: Partial<ManagedAgentPlatformWorkerAssignedRunResult["workItem"]>,
 ): ManagedAgentPlatformWorkerAssignedRunResult {
   return {
     organization: {
@@ -49,6 +50,7 @@ function createAssignedRun(
       priority: "normal",
       createdAt: "2026-04-14T12:00:00.000Z",
       updatedAt: "2026-04-14T12:00:00.000Z",
+      ...workItem,
     },
     run: {
       runId: "run-alpha",
@@ -314,6 +316,114 @@ test("createLocalWorkerExecutor 会把只读联网工单映射为 Codex 可联�
     assert.match(String(structuredOutput.artifactContents.prompt.content), /sandboxMode: read-only/);
     assert.match(String(structuredOutput.artifactContents.prompt.content), /effectiveCodexSandboxMode: workspace-write/);
     assert.match(String(structuredOutput.artifactContents.prompt.content), /不要修改、新增或删除文件/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("createLocalWorkerExecutor 会把 readOnlyFactSourcePacks 安全摘要写进执行 prompt", async () => {
+  const root = join(tmpdir(), `themis-worker-node-local-executor-fact-sources-${Date.now()}`);
+  const workspacePath = join(root, "workspace");
+  const codexHome = join(root, "codex-home");
+  const codexBin = join(root, "codex");
+  const secretValue = "cf-secret-value-should-not-appear";
+  mkdirSync(workspacePath, { recursive: true });
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(join(workspacePath, "README.md"), "# worker\n", "utf8");
+  writeFileSync(join(codexHome, "auth.json"), "{\"token\":\"default\"}\n", "utf8");
+  writeFileSync(codexBin, "#!/bin/sh\n", "utf8");
+
+  const executor = createLocalWorkerExecutor({
+    workingDirectory: root,
+    env: {
+      CODEX_HOME: codexHome,
+      THEMIS_WORKER_CODEX_BIN: codexBin,
+      THEMIS_PROVIDER_OPENAI_BASE_URL: "https://api.openai.example.com",
+      THEMIS_PROVIDER_OPENAI_API_KEY: "provider-secret",
+      THEMIS_WORKER_SECRET_CLOUDFLARE_READONLY_TOKEN: secretValue,
+    },
+    now: () => "2026-04-14T12:30:00.000Z",
+    commandRunner: async (command, args) => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { stdout: "false\n", stderr: "" };
+      }
+
+      if (command === codexBin && args[0] === "exec") {
+        const outputFile = args[args.indexOf("-o") + 1];
+        assert.ok(outputFile);
+        writeFileSync(String(outputFile), JSON.stringify({
+          summary: "只读事实源上下文可见。",
+          deliverable: "已看到 readOnlyFactSourcePacks 清单和 secretRef 映射。",
+          artifactPaths: [],
+          followUp: [],
+        }, null, 2), "utf8");
+        return { stdout: "", stderr: "" };
+      }
+
+      throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
+    },
+  });
+
+  try {
+    const result = await executor.execute({
+      assignedRun: createAssignedRun(
+        workspacePath,
+        {
+          sandboxMode: "read-only",
+          networkAccessEnabled: true,
+          secretEnvRefs: [{
+            envName: "CLOUDFLARE_API_TOKEN",
+            secretRef: "cloudflare-readonly-token",
+            required: true,
+          }],
+        },
+        {
+          contextPacket: {
+            safety: "read_only_only_no_writes",
+            readOnlyFactSourcePackIds: [
+              "cloudflare_readonly",
+              "operations_ledger_readonly",
+              "feishu_base_readonly",
+            ],
+            readOnlyFactSources: [{
+              id: "cloudflare_readonly",
+              label: "Cloudflare / DNS 只读事实源",
+              mode: "read_only",
+              access: "worker_secret_env:CLOUDFLARE_API_TOKEN",
+              requiresNetworkAccess: true,
+              instructions: [
+                "只读取 Cloudflare zone、DNS 记录、代理状态和相关只读配置，不创建、不修改、不删除。",
+              ],
+              expectedInputs: ["domains", "zone names"],
+              secretEnvRefs: [{
+                envName: "CLOUDFLARE_API_TOKEN",
+                secretRef: "cloudflare-readonly-token",
+                required: true,
+              }],
+            }, {
+              id: "operations_ledger_readonly",
+              label: "运营中枢只读账本",
+              mode: "read_only",
+              access: "themis_operations_mcp",
+              requiresNetworkAccess: false,
+              toolNames: ["list_operation_objects", "get_operations_boss_view"],
+            }],
+          },
+        },
+      ),
+    });
+
+    assert.equal(result.kind, "completed");
+    const structuredOutput = result.structuredOutput as Record<string, any>;
+    const prompt = String(structuredOutput.artifactContents.prompt.content);
+    assert.match(prompt, /只读事实源上下文/);
+    assert.match(prompt, /safety: read_only_only_no_writes/);
+    assert.match(prompt, /readOnlyFactSourcePackIds: cloudflare_readonly, operations_ledger_readonly, feishu_base_readonly/);
+    assert.match(prompt, /cloudflare_readonly: Cloudflare \/ DNS 只读事实源; mode=read_only; access=worker_secret_env:CLOUDFLARE_API_TOKEN; requiresNetworkAccess=true/);
+    assert.match(prompt, /secretEnvRefs: CLOUDFLARE_API_TOKEN -> cloudflare-readonly-token \(required=true, status=injected\)/);
+    assert.match(prompt, /toolNames: list_operation_objects, get_operations_boss_view/);
+    assert.match(prompt, /sandboxAdjustedForNetworkAccess: true/);
+    assert.doesNotMatch(prompt, new RegExp(secretValue));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
