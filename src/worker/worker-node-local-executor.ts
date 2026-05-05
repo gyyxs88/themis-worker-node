@@ -19,6 +19,13 @@ const REDACTED_SECRET = "[REDACTED_SECRET]";
 const SECRET_ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const MAX_FACT_SOURCE_INSTRUCTION_LINES = 3;
 const MAX_FACT_SOURCE_TEXT_LENGTH = 220;
+const MAX_CONTEXT_PACKET_JSON_CHARS = 16_000;
+const MAX_CONTEXT_PACKET_DEPTH = 8;
+const MAX_CONTEXT_PACKET_ARRAY_ITEMS = 50;
+const MAX_CONTEXT_PACKET_OBJECT_KEYS = 120;
+const MAX_CONTEXT_PACKET_TEXT_CHARS = 2_000;
+const REDACTED_CONTEXT_VALUE = "[REDACTED_CONTEXT_VALUE]";
+const TRUNCATED_CONTEXT_VALUE = "[TRUNCATED_CONTEXT_VALUE]";
 
 export interface WorkerNodeLocalExecutorCommandInput {
   cwd: string;
@@ -558,6 +565,7 @@ function writeExecutionReport(input: {
   completedAt: string;
 }) {
   const reportFile = join(input.reportDirectory, "report.json");
+  const safeContextPacket = sanitizeContextPacket(input.assignedRun.workItem.contextPacket);
   mkdirSync(input.reportDirectory, { recursive: true });
   writeFileSync(reportFile, `${JSON.stringify({
     generatedAt: input.completedAt,
@@ -573,6 +581,13 @@ function writeExecutionReport(input: {
       goal: input.assignedRun.workItem.goal,
       priority: input.assignedRun.workItem.priority,
       sourceType: input.assignedRun.workItem.sourceType,
+      ...(safeContextPacket
+        ? {
+            contextPacket: safeContextPacket.value,
+            contextPacketRedacted: true,
+            contextPacketTruncated: safeContextPacket.truncated,
+          }
+        : {}),
     },
     executionContract: {
       workspacePath: input.workspacePath,
@@ -1020,6 +1035,7 @@ function buildCodexPrompt(
     executionOptions,
     secretEnvRefs,
   );
+  const contextPacketLines = buildContextPacketPromptLines(assignedRun.workItem.contextPacket);
   return [
     "你正在 Themis Worker Node 上执行一条真实工单。",
     "",
@@ -1046,9 +1062,147 @@ function buildCodexPrompt(
     "3. 不要向人追问额外输入；在现有上下文下尽最大努力完成，并明确写出不确定性。",
     "4. 最终输出必须符合 JSON schema：summary 用一句话概括结果，deliverable 写完整可读的交付正文，artifactPaths/followUp 用字符串数组。",
     "5. 如果使用 secret 环境变量，只能在命令环境中读取，不要在 stdout、stderr、deliverable、artifactPaths、followUp 或写入文件中回显真实 secret 值。",
+    ...contextPacketLines,
     ...readOnlyFactSourceLines,
     ...injectedSecretLines,
   ].join("\n");
+}
+
+function buildContextPacketPromptLines(contextPacket: unknown): string[] {
+  const safeContextPacket = sanitizeContextPacket(contextPacket);
+
+  if (!safeContextPacket) {
+    return [];
+  }
+
+  return [
+    "",
+    "工单上下文包（contextPacket，已脱敏；不包含 secret/token/account id 值）：",
+    safeContextPacket.serialized,
+    ...(safeContextPacket.truncated ? ["- contextPacketTruncated: true"] : []),
+  ];
+}
+
+interface SanitizedContextPacket {
+  value: unknown;
+  serialized: string;
+  truncated: boolean;
+}
+
+function sanitizeContextPacket(contextPacket: unknown): SanitizedContextPacket | null {
+  if (!isRecord(contextPacket)) {
+    return null;
+  }
+
+  const state = { truncated: false };
+  const value = sanitizeContextPacketValue(contextPacket, [], 0, state);
+  let serialized = JSON.stringify(value, null, 2);
+
+  if (serialized.length > MAX_CONTEXT_PACKET_JSON_CHARS) {
+    state.truncated = true;
+    serialized = `${serialized.slice(0, MAX_CONTEXT_PACKET_JSON_CHARS - TRUNCATED_CONTEXT_VALUE.length - 1)}\n${TRUNCATED_CONTEXT_VALUE}`;
+  }
+
+  return {
+    value,
+    serialized,
+    truncated: state.truncated,
+  };
+}
+
+function sanitizeContextPacketValue(
+  value: unknown,
+  keyPath: string[],
+  depth: number,
+  state: { truncated: boolean },
+): unknown {
+  const currentKey = keyPath[keyPath.length - 1] ?? "";
+
+  if (currentKey && isSensitiveContextPacketKey(currentKey)) {
+    return REDACTED_CONTEXT_VALUE;
+  }
+
+  if (value === null || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return sanitizeContextPacketString(value, state);
+  }
+
+  if (depth >= MAX_CONTEXT_PACKET_DEPTH) {
+    state.truncated = true;
+    return TRUNCATED_CONTEXT_VALUE;
+  }
+
+  if (Array.isArray(value)) {
+    const items = value.slice(0, MAX_CONTEXT_PACKET_ARRAY_ITEMS)
+      .map((item, index) => sanitizeContextPacketValue(item, [...keyPath, String(index)], depth + 1, state));
+
+    if (value.length > MAX_CONTEXT_PACKET_ARRAY_ITEMS) {
+      state.truncated = true;
+      items.push(TRUNCATED_CONTEXT_VALUE);
+    }
+
+    return items;
+  }
+
+  if (isRecord(value)) {
+    const entries = Object.entries(value);
+    const result: Record<string, unknown> = {};
+
+    for (const [key, entryValue] of entries.slice(0, MAX_CONTEXT_PACKET_OBJECT_KEYS)) {
+      result[key] = sanitizeContextPacketValue(entryValue, [...keyPath, key], depth + 1, state);
+    }
+
+    if (entries.length > MAX_CONTEXT_PACKET_OBJECT_KEYS) {
+      state.truncated = true;
+      result.__truncatedKeys = entries.length - MAX_CONTEXT_PACKET_OBJECT_KEYS;
+    }
+
+    return result;
+  }
+
+  return String(value);
+}
+
+function isSensitiveContextPacketKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+  if ([
+    "secretref",
+    "secretrefs",
+    "secretenvref",
+    "secretenvrefs",
+    "secretcapability",
+    "secretcapabilities",
+  ].includes(normalized)) {
+    return false;
+  }
+
+  return normalized.includes("authorization")
+    || normalized.includes("password")
+    || normalized.includes("passwd")
+    || normalized.includes("token")
+    || normalized.includes("apikey")
+    || normalized.includes("privatekey")
+    || normalized.includes("accesskey")
+    || normalized.includes("credential")
+    || normalized.includes("secret")
+    || normalized.includes("accountid");
+}
+
+function sanitizeContextPacketString(value: string, state: { truncated: boolean }): string {
+  let sanitized = value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTED_CONTEXT_VALUE}`)
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, REDACTED_CONTEXT_VALUE);
+
+  if (sanitized.length > MAX_CONTEXT_PACKET_TEXT_CHARS) {
+    state.truncated = true;
+    sanitized = `${sanitized.slice(0, MAX_CONTEXT_PACKET_TEXT_CHARS - TRUNCATED_CONTEXT_VALUE.length)}${TRUNCATED_CONTEXT_VALUE}`;
+  }
+
+  return sanitized;
 }
 
 function buildReadOnlyFactSourcePromptLines(

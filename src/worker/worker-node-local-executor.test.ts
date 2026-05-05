@@ -321,6 +321,112 @@ test("createLocalWorkerExecutor 会把只读联网工单映射为 Codex 可联�
   }
 });
 
+test("createLocalWorkerExecutor 会把通用 contextPacket 脱敏后写进 prompt 和 report", async () => {
+  const root = join(tmpdir(), `themis-worker-node-local-executor-context-packet-${Date.now()}`);
+  const workspacePath = join(root, "workspace");
+  const codexHome = join(root, "codex-home");
+  const codexBin = join(root, "codex");
+  mkdirSync(workspacePath, { recursive: true });
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(join(workspacePath, "README.md"), "# worker\n", "utf8");
+  writeFileSync(join(codexHome, "auth.json"), "{\"token\":\"default\"}\n", "utf8");
+  writeFileSync(codexBin, "#!/bin/sh\n", "utf8");
+
+  const executor = createLocalWorkerExecutor({
+    workingDirectory: root,
+    env: {
+      CODEX_HOME: codexHome,
+      THEMIS_WORKER_CODEX_BIN: codexBin,
+      THEMIS_PROVIDER_OPENAI_BASE_URL: "https://api.openai.example.com",
+      THEMIS_PROVIDER_OPENAI_API_KEY: "provider-secret",
+    },
+    now: () => "2026-04-14T12:30:00.000Z",
+    commandRunner: async (command, args) => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { stdout: "false\n", stderr: "" };
+      }
+
+      if (command === codexBin && args[0] === "exec") {
+        const outputFile = args[args.indexOf("-o") + 1];
+        assert.ok(outputFile);
+        writeFileSync(String(outputFile), JSON.stringify({
+          summary: "通用 contextPacket 可见。",
+          deliverable: "已读取 Feishu Base 表定位、运营中枢摘要和 previousRunFacts。",
+          artifactPaths: [],
+          followUp: [],
+        }, null, 2), "utf8");
+        return { stdout: "", stderr: "" };
+      }
+
+      throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
+    },
+  });
+
+  try {
+    const result = await executor.execute({
+      assignedRun: createAssignedRun(
+        workspacePath,
+        {
+          sandboxMode: "read-only",
+        },
+        {
+          contextPacket: {
+            feishuBaseTargets: {
+              baseUrl: "https://example.feishu.cn/base/app123",
+              domainTableId: "tbl-domain",
+              serverTableId: "tbl-server",
+              appToken: "bascn-secret-token-should-not-appear",
+            },
+            operationsLedgerSnapshot: {
+              summary: "Cloudflare / Feishu / 运营中枢三方待对齐。",
+              assetIds: ["asset-domain", "asset-server"],
+            },
+            previousRunFacts: [{
+              workItemId: "work-item-platform-57",
+              finding: "缺少 Base 定位。",
+            }],
+            cloudflareAccountId: "cf-account-id-should-not-appear",
+            authorization: "Bearer should-not-appear",
+            nested: {
+              apiKey: "api-key-should-not-appear",
+              secretRef: "cloudflare-readonly-token",
+            },
+          },
+        },
+      ),
+    });
+
+    assert.equal(result.kind, "completed");
+    const structuredOutput = result.structuredOutput as Record<string, any>;
+    const prompt = String(structuredOutput.artifactContents.prompt.content);
+    assert.match(prompt, /工单上下文包/);
+    assert.match(prompt, /feishuBaseTargets/);
+    assert.match(prompt, /tbl-domain/);
+    assert.match(prompt, /tbl-server/);
+    assert.match(prompt, /operationsLedgerSnapshot/);
+    assert.match(prompt, /previousRunFacts/);
+    assert.match(prompt, /cloudflare-readonly-token/);
+    assert.doesNotMatch(prompt, /bascn-secret-token-should-not-appear/);
+    assert.doesNotMatch(prompt, /cf-account-id-should-not-appear/);
+    assert.doesNotMatch(prompt, /should-not-appear/);
+
+    const reportFile = result.touchedFiles?.[0];
+    assert.ok(reportFile);
+    const report = JSON.parse(readFileSync(reportFile, "utf8")) as Record<string, any>;
+    assert.equal(report.workItem.contextPacketRedacted, true);
+    assert.equal(report.workItem.contextPacketTruncated, false);
+    assert.equal(report.workItem.contextPacket.feishuBaseTargets.domainTableId, "tbl-domain");
+    assert.equal(report.workItem.contextPacket.feishuBaseTargets.serverTableId, "tbl-server");
+    assert.equal(report.workItem.contextPacket.feishuBaseTargets.appToken, "[REDACTED_CONTEXT_VALUE]");
+    assert.equal(report.workItem.contextPacket.cloudflareAccountId, "[REDACTED_CONTEXT_VALUE]");
+    assert.equal(report.workItem.contextPacket.authorization, "[REDACTED_CONTEXT_VALUE]");
+    assert.equal(report.workItem.contextPacket.nested.apiKey, "[REDACTED_CONTEXT_VALUE]");
+    assert.equal(report.workItem.contextPacket.nested.secretRef, "cloudflare-readonly-token");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("createLocalWorkerExecutor 会把 readOnlyFactSourcePacks 安全摘要写进执行 prompt", async () => {
   const root = join(tmpdir(), `themis-worker-node-local-executor-fact-sources-${Date.now()}`);
   const workspacePath = join(root, "workspace");
